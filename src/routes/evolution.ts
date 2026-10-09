@@ -8,7 +8,10 @@ import {
   setWebhook,
   deleteInstance,
   instanceExists,
+  fetchGroups,
+  sendText,
 } from "../services/evolution";
+import { getAllowedGroups } from "../services/reminders";
 
 const router = Router();
 
@@ -52,10 +55,10 @@ router.post("/provision/:profileId", requireAdmin, async (req: Request, res: Res
     }
 
     // 2. Configurar webhook da instância para o n8n
-    if (N8N_WEBHOOK_BASE) {
-      const webhookUrl = `${N8N_WEBHOOK_BASE}/webhook/a/event/messages-upsert`;
-      await setWebhook(instance_name, webhookUrl);
-    }
+    const webhookUrl = N8N_WEBHOOK_BASE
+      ? `${N8N_WEBHOOK_BASE}/webhook-test/a/event/messages-upsert`
+      : "https://hostinger-n8n.pqtwua.easypanel.host/webhook-test/a/event/messages-upsert";
+    await setWebhook(instance_name, webhookUrl);
 
     // 3. Salvar instance_name no profile
     await query(
@@ -107,6 +110,58 @@ router.get("/status/:instanceName", requireAdmin, async (_req: Request, res: Res
     return res.json(data);
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/evolution/groups/:instanceName
+ * Lista os grupos da instância (para escolher o grupo dos lembretes).
+ */
+router.get("/groups/:instanceName", requireAdmin, async (req: Request, res: Response) => {
+  const { instanceName } = req.params;
+  try {
+    const groups = await fetchGroups(instanceName);
+    return res.json(groups.map((g) => ({ id: g.id, subject: g.subject, size: g.size })));
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/evolution/send
+ * Envia uma mensagem de texto avulsa para um grupo (xxx@g.us) ou número.
+ * Body: { to: string, text: string, instance_name?: string }
+ * Sem instance_name, usa a instância configurada nos lembretes (reminders_instance).
+ */
+router.post("/send", requireAdmin, async (req: Request, res: Response) => {
+  const { to, text } = req.body;
+  let { instance_name } = req.body;
+
+  if (!to || !text?.trim()) {
+    return res.status(400).json({ error: "to e text são obrigatórios" });
+  }
+  try {
+    if (!(await getAllowedGroups()).includes(to)) {
+      return res.status(403).json({ error: "Destino não permitido: o robô só envia para os grupos em allowed_groups" });
+    }
+
+    if (!instance_name) {
+      const setting = await queryOne<{ value: string }>("SELECT value FROM system_settings WHERE key = 'reminders_instance'");
+      instance_name = setting?.value;
+    }
+    if (!instance_name) return res.status(400).json({ error: "instance_name não informado e nenhuma instância padrão configurada" });
+
+    const result: any = await sendText(instance_name, to, text.trim());
+
+    await query(
+      `INSERT INTO audit_logs (admin_id, action, target_type, details) VALUES ($1, 'send_message', 'whatsapp', $2)`,
+      [req.auth!.userId, JSON.stringify({ instance_name, to, text: text.trim() })]
+    );
+
+    return res.json({ success: true, instance_name, to, message_id: result?.key?.id });
+  } catch (error: any) {
+    console.error("Send message error:", error);
+    return res.status(500).json({ error: error.message || "Erro ao enviar mensagem" });
   }
 });
 

@@ -30,6 +30,7 @@ export async function createInstance(instanceName: string): Promise<{ instance: 
     instanceName,
     qrcode: true,
     integration: "WHATSAPP-BAILEYS",
+    webhookBase64: true,
   });
 }
 
@@ -50,7 +51,7 @@ export async function setWebhook(instanceName: string, webhookUrl: string): Prom
       enabled: true,
       url: webhookUrl,
       webhookByEvents: false,
-      webhookBase64: false,
+      webhookBase64: true,
       events: ["MESSAGES_UPSERT"],
     },
   });
@@ -66,6 +67,16 @@ export async function deleteInstance(instanceName: string): Promise<unknown> {
 /** Lista todas as instâncias */
 export async function listInstances(): Promise<unknown[]> {
   return evo("GET", "/instance/fetchInstances");
+}
+
+/** Envia mensagem de texto para um número ou grupo (ex: 1203630xxx@g.us) */
+export async function sendText(instanceName: string, number: string, text: string): Promise<unknown> {
+  return evo("POST", `/message/sendText/${instanceName}`, { number, text });
+}
+
+/** Lista os grupos dos quais a instância participa */
+export async function fetchGroups(instanceName: string): Promise<{ id: string; subject: string; size?: number }[]> {
+  return evo("GET", `/group/fetchAllGroups/${instanceName}?getParticipants=false`);
 }
 
 /** Verifica se uma instância existe e retorna o token dela se existir */

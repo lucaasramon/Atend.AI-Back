@@ -17,6 +17,9 @@ import auditRoutes from "./routes/audit";
 import billingRoutes from "./routes/billing";
 import evolutionRoutes from "./routes/evolution";
 import aiRoutes from "./routes/ai";
+import webhookRoutes from "./routes/webhook";
+import eventRoutes from "./routes/events";
+import { startReminderJob } from "./services/reminders";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -51,6 +54,8 @@ app.use("/api/audit", auditRoutes);
 app.use("/api/billing", billingRoutes);
 app.use("/api/evolution", evolutionRoutes);
 app.use("/api/ai", aiRoutes);
+app.use("/api/webhook", webhookRoutes);
+app.use("/api/events", eventRoutes);
 
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
@@ -58,6 +63,7 @@ app.get("/api/health", (_req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Backend rodando na porta ${PORT}`);
+  startReminderJob();
 });
 
 export default app;
