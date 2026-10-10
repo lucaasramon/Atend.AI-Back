@@ -22,13 +22,34 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   }
 
   const token = header.slice(7);
+  let payload: AuthPayload;
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET!) as AuthPayload;
-    req.auth = payload;
-    next();
+    payload = jwt.verify(token, process.env.JWT_SECRET!) as AuthPayload;
   } catch {
     return res.status(401).json({ error: "Token inválido ou expirado" });
   }
+
+  // Usuário "agenda" só acessa a agenda e os próprios dados de login
+  if (payload.role === "agenda" && !AGENDA_PATHS.test(req.originalUrl.split("?")[0])) {
+    return res.status(403).json({ error: "Acesso negado" });
+  }
+
+  req.auth = payload;
+  next();
+}
+
+const AGENDA_PATHS = /^\/api\/(auth\/me|events(\/.*)?)$/;
+
+/** Exige um dos tipos de usuário informados */
+export function requireRole(...roles: string[]) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    requireAuth(req, res, () => {
+      if (!roles.includes(req.auth!.role)) {
+        return res.status(403).json({ error: "Acesso negado" });
+      }
+      next();
+    });
+  };
 }
 
 export function requireAdmin(req: Request, res: Response, next: NextFunction) {

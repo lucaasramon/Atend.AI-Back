@@ -1,9 +1,13 @@
 import { Router, Request, Response } from "express";
 import { query, queryOne } from "../db";
-import { requireAdmin } from "../middleware/auth";
+import { requireAdmin, requireRole } from "../middleware/auth";
+import { fetchGroups } from "../services/evolution";
 import { getAllowedGroups, getReminderSettings, renderMessage, reminderSendAt, runReminders } from "../services/reminders";
 
 const router = Router();
+
+// Admin e usuário "agenda" podem gerenciar eventos
+const requireEditor = requireRole("admin", "agenda");
 
 const PUBLIC_FIELDS = "id, title, description, location, starts_at, ends_at";
 
@@ -25,8 +29,25 @@ router.get("/public", async (req: Request, res: Response) => {
   }
 });
 
+// GET /api/events/config  (configuração dos lembretes, somente leitura)
+router.get("/config", requireEditor, async (_req: Request, res: Response) => {
+  try {
+    const cfg = await getReminderSettings();
+    const allowed = await getAllowedGroups();
+    const names = await fetchGroups(cfg.instance).catch(() => []);
+    return res.json({
+      enabled: cfg.enabled,
+      offsets: cfg.offsets,
+      group_jid: cfg.groupJid,
+      groups: allowed.map((id) => ({ id, subject: names.find((g) => g.id === id)?.subject || id })),
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
 // GET /api/events  (admin — todos os eventos, com lembretes já enviados)
-router.get("/", requireAdmin, async (_req: Request, res: Response) => {
+router.get("/", requireEditor, async (_req: Request, res: Response) => {
   try {
     const rows = await query(
       `SELECT e.*,
@@ -44,7 +65,7 @@ router.get("/", requireAdmin, async (_req: Request, res: Response) => {
 });
 
 // POST /api/events
-router.post("/", requireAdmin, async (req: Request, res: Response) => {
+router.post("/", requireEditor, async (req: Request, res: Response) => {
   const { title, description, location, starts_at, ends_at, is_public, group_jid } = req.body;
   if (!title || !starts_at) return res.status(400).json({ error: "title e starts_at são obrigatórios" });
   if (group_jid && !(await getAllowedGroups()).includes(group_jid)) {
@@ -64,7 +85,7 @@ router.post("/", requireAdmin, async (req: Request, res: Response) => {
 });
 
 // PATCH /api/events/:id
-router.patch("/:id", requireAdmin, async (req: Request, res: Response) => {
+router.patch("/:id", requireEditor, async (req: Request, res: Response) => {
   const { title, description, location, starts_at, ends_at, is_public, group_jid } = req.body;
   if (group_jid && !(await getAllowedGroups()).includes(group_jid)) {
     return res.status(400).json({ error: "group_jid não permitido: use um grupo de allowed_groups" });
@@ -98,7 +119,7 @@ router.patch("/:id", requireAdmin, async (req: Request, res: Response) => {
 });
 
 // DELETE /api/events/:id
-router.delete("/:id", requireAdmin, async (req: Request, res: Response) => {
+router.delete("/:id", requireEditor, async (req: Request, res: Response) => {
   try {
     await query("DELETE FROM events WHERE id = $1", [req.params.id]);
     return res.json({ success: true });
@@ -108,7 +129,7 @@ router.delete("/:id", requireAdmin, async (req: Request, res: Response) => {
 });
 
 // GET /api/events/:id/preview  (admin — mostra como ficará a mensagem de cada antecedência)
-router.get("/:id/preview", requireAdmin, async (req: Request, res: Response) => {
+router.get("/:id/preview", requireEditor, async (req: Request, res: Response) => {
   try {
     const ev = await queryOne<any>("SELECT * FROM events WHERE id = $1", [req.params.id]);
     if (!ev) return res.status(404).json({ error: "Evento não encontrado" });
