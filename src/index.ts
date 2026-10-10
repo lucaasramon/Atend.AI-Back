@@ -33,8 +33,9 @@ app.use(cors({
     if (!origin) return callback(null, true);
     // Allow any localhost port in development
     if (/^http:\/\/localhost(:\d+)?$/.test(origin)) return callback(null, true);
-    // Allow configured frontend URL in production
-    if (origin === process.env.FRONTEND_URL) return callback(null, true);
+    // Allow configured frontend URL(s) in production (separadas por vírgula)
+    const allowed = (process.env.FRONTEND_URL || "").split(",").map((u) => u.trim().replace(/\/$/, ""));
+    if (allowed.includes(origin)) return callback(null, true);
     callback(new Error("Not allowed by CORS"));
   },
   credentials: true,
