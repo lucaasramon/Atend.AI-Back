@@ -169,13 +169,35 @@ function nextRunAt(now: Date): Date {
   return today > now ? today : new Date(today.getTime() + DAY_MS);
 }
 
-async function tick() {
+/** true se a rodada de hoje (RUN_TIME) já passou */
+export function isPastTodayRun(now = new Date()): boolean {
+  return now >= new Date(`${localDate(now)}T${RUN_TIME}:00${TZ_OFFSET}`);
+}
+
+const RETRY_MS = 5 * 60_000;
+const MAX_RETRIES = 6;
+
+async function tick(attempt = 0) {
   try {
     const r = await runReminders();
     console.log(`[reminders] rodada concluída: enviados=${r.sent} pulados=${r.skipped} erros=${r.errors.length}`, r.errors);
   } catch (err) {
     console.error("[reminders] falha na rodada:", err);
+    // Falha de infraestrutura (ex.: banco reiniciando): tenta de novo em alguns minutos
+    if (attempt < MAX_RETRIES) {
+      console.log(`[reminders] nova tentativa em 5 min (${attempt + 1}/${MAX_RETRIES})`);
+      setTimeout(() => tick(attempt + 1), RETRY_MS);
+    }
   }
+}
+
+/**
+ * Chamado ao criar/editar um evento: se a rodada de hoje já passou, roda agora
+ * para que lembretes já vencidos (ex.: evento de hoje à tarde) não fiquem para amanhã.
+ */
+export function runRemindersIfPastToday() {
+  if (!isPastTodayRun()) return;
+  tick();
 }
 
 function scheduleNext() {
@@ -189,7 +211,6 @@ function scheduleNext() {
 
 export function startReminderJob() {
   // Se o servidor subir depois do horário do dia, roda já (recupera envios perdidos; não duplica)
-  const todayRun = new Date(`${localDate(new Date())}T${RUN_TIME}:00${TZ_OFFSET}`);
-  if (new Date() >= todayRun) setTimeout(tick, 10_000);
+  if (isPastTodayRun()) setTimeout(tick, 10_000);
   scheduleNext();
 }

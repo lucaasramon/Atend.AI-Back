@@ -2,7 +2,7 @@ import { Router, Request, Response } from "express";
 import { query, queryOne } from "../db";
 import { requireAdmin, requireRole } from "../middleware/auth";
 import { fetchGroups } from "../services/evolution";
-import { getAllowedGroups, getReminderSettings, renderMessage, reminderSendAt, runReminders } from "../services/reminders";
+import { getAllowedGroups, getReminderSettings, renderMessage, reminderSendAt, runReminders, runRemindersIfPastToday } from "../services/reminders";
 
 const router = Router();
 
@@ -78,6 +78,7 @@ router.post("/", requireEditor, async (req: Request, res: Response) => {
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
       [title, description || null, location || null, starts_at, ends_at || null, is_public ?? true, group_jid || null, req.auth!.userId]
     );
+    runRemindersIfPastToday();
     return res.status(201).json(row);
   } catch (error) {
     return res.status(400).json({ error: "Dados inválidos" });
@@ -112,6 +113,7 @@ router.patch("/:id", requireEditor, async (req: Request, res: Response) => {
       await query("DELETE FROM event_reminders_sent WHERE event_id = $1", [req.params.id]);
     }
 
+    runRemindersIfPastToday();
     return res.json(updated);
   } catch (error) {
     return res.status(400).json({ error: "Dados inválidos" });
