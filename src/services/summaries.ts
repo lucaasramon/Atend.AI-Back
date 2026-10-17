@@ -5,6 +5,7 @@
  */
 import { query } from "../db";
 import { DAY_MS, TZ, TZ_OFFSET, getReminderSettings, localDate, sendToGroups } from "./reminders";
+import { EVENT_COLUMNS, EventLocation, EventMinistry, locationLabel } from "./eventData";
 
 export type SummaryKind = "monthly" | "weekly";
 
@@ -13,6 +14,8 @@ interface SummaryEvent {
   title: string;
   location: string | null;
   starts_at: Date;
+  ministries?: EventMinistry[];
+  locations?: EventLocation[];
 }
 
 const atLocal = (day: string, time = "00:00") => new Date(`${day}T${time}:00${TZ_OFFSET}`);
@@ -50,16 +53,17 @@ export function renderSummary(title: string, events: SummaryEvent[]): string | n
       lastDay = day;
     }
     const hora = d.toLocaleTimeString("pt-BR", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
-    lines.push(`• ${hora} — ${ev.title}${ev.location ? ` · ${ev.location}` : ""}`);
+    const where = locationLabel(ev);
+    lines.push(`• ${hora} — ${ev.title}${where ? ` · ${where}` : ""}`);
   }
   return lines.join("\n");
 }
 
 async function eventsBetween(start: Date, end: Date): Promise<SummaryEvent[]> {
   return query<SummaryEvent>(
-    `SELECT id, title, location, starts_at FROM events
-      WHERE starts_at >= $1 AND starts_at < $2
-      ORDER BY starts_at`,
+    `SELECT ${EVENT_COLUMNS} FROM events e
+      WHERE e.starts_at >= $1 AND e.starts_at < $2 AND e.status = 'approved'
+      ORDER BY e.starts_at`,
     [start, end]
   );
 }
@@ -79,16 +83,37 @@ async function sendSummary(kind: SummaryKind, day: string, instance: string, mai
   );
   if (!claimed.length) return { kind, period: p.key, status: "já enviado" };
 
-  const text = renderSummary(p.title, await eventsBetween(p.start, p.end));
+  const events = await eventsBetween(p.start, p.end);
+  const text = renderSummary(p.title, events);
   if (!text) return { kind, period: p.key, status: "sem eventos" };
 
+  // Grupo principal: resumo completo
   const r = await sendToGroups(instance, [mainGroup], text, `resumo ${kind}`);
   if (!r.sent) {
     // Ninguém recebeu: libera para a próxima tentativa
     await query("DELETE FROM summaries_sent WHERE kind = $1 AND period = $2", [kind, p.key]);
     throw new Error(r.errors.join("; ") || "resumo não enviado");
   }
-  return { kind, period: p.key, status: "enviado", errors: r.errors };
+
+  // Cada ministério com grupo próprio: só os eventos dele
+  const byGroup = new Map<string, { name: string; events: SummaryEvent[] }>();
+  for (const ev of events) {
+    for (const m of ev.ministries || []) {
+      if (!m.group_jid || m.group_jid === mainGroup) continue;
+      const entry = byGroup.get(m.group_jid) || { name: m.name, events: [] };
+      if (!entry.events.includes(ev)) entry.events.push(ev); // dois ministérios no mesmo grupo
+      byGroup.set(m.group_jid, entry);
+    }
+  }
+  let ministries = 0;
+  for (const [group, { name, events: list }] of byGroup) {
+    const t = renderSummary(`${p.title}
+_Ministério: ${name}_`, list);
+    const mr = await sendToGroups(instance, [group], t!, `resumo ${kind} ${name}`);
+    ministries += mr.sent;
+    r.errors.push(...mr.errors);
+  }
+  return { kind, period: p.key, status: "enviado", ministries, errors: r.errors };
 }
 
 /** Rodada diária: manda o resumo mensal no dia 1º e o semanal na segunda-feira */

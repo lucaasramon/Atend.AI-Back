@@ -5,6 +5,7 @@
  */
 import { query } from "../db";
 import { sendText } from "./evolution";
+import { EVENT_COLUMNS, EventLocation, EventMinistry, locationLabel } from "./eventData";
 
 export const TZ = "America/Sao_Paulo";
 export const TZ_OFFSET = "-03:00"; // Brasil sem horário de verão desde 2019
@@ -27,6 +28,8 @@ export interface EventRow {
   starts_at: Date;
   group_jid?: string | null;
   reminder_offsets?: number[] | null;
+  ministries?: EventMinistry[];
+  locations?: EventLocation[];
 }
 
 /** "30, 7,0" → [30, 7, 0] (maior para menor, sem repetidos) */
@@ -61,10 +64,13 @@ export async function getAllowedGroups(): Promise<string[]> {
   return (rows[0]?.value || "").split(",").map((v) => v.trim()).filter(Boolean);
 }
 
-/** Grupos que recebem os avisos de um evento */
-export async function eventTargets(ev: EventRow, cfg: ReminderSettings): Promise<string[]> {
-  const groups = [ev.group_jid || cfg.groupJid].filter(Boolean) as string[];
-  return Array.from(new Set(groups));
+/**
+ * Grupos que recebem os avisos de um evento:
+ * grupo principal (pastores) + grupos dos ministérios do evento + grupo extra do evento
+ */
+export function eventTargets(ev: EventRow, cfg: ReminderSettings): string[] {
+  const groups = [cfg.groupJid, ...(ev.ministries || []).map((m) => m.group_jid), ev.group_jid];
+  return Array.from(new Set(groups.filter(Boolean))) as string[];
 }
 
 /**
@@ -120,7 +126,7 @@ export function renderMessage(template: string, ev: EventRow, daysUntil: number)
     .replace(/\{titulo\}/g, ev.title)
     .replace(/\{data\}/g, data)
     .replace(/\{hora\}/g, hora)
-    .replace(/\{local\}/g, ev.location || "a definir")
+    .replace(/\{local\}/g, locationLabel(ev) || "a definir")
     .replace(/\{descricao\}/g, ev.description || "")
     .replace(/\{quando\}/g, formatWhen(daysUntil))
     .replace(/\n{3,}/g, "\n\n")
@@ -145,12 +151,10 @@ export async function runReminders(): Promise<{ sent: number; skipped: number; e
   if (!cfg.enabled || !cfg.instance) return result;
 
   const events = await query<EventRow & { sent_offsets: number[] }>(
-    `SELECT e.id, e.title, e.description, e.location, e.starts_at, e.group_jid, e.reminder_offsets,
-            COALESCE(array_agg(r.offset_days) FILTER (WHERE r.offset_days IS NOT NULL), '{}') AS sent_offsets
+    `SELECT ${EVENT_COLUMNS},
+            COALESCE((SELECT array_agg(r.offset_days) FROM event_reminders_sent r WHERE r.event_id = e.id), '{}') AS sent_offsets
        FROM events e
-       LEFT JOIN event_reminders_sent r ON r.event_id = e.id
-      WHERE e.starts_at > NOW()
-      GROUP BY e.id`
+      WHERE e.starts_at > NOW() AND e.status = 'approved'`
   );
 
   const now = new Date();
@@ -159,7 +163,7 @@ export async function runReminders(): Promise<{ sent: number; skipped: number; e
     const due = eventOffsets(ev, cfg).filter((off) => daysUntil <= off && !ev.sent_offsets.includes(off));
     if (!due.length) continue;
 
-    const targets = await eventTargets(ev, cfg);
+    const targets = eventTargets(ev, cfg);
     if (!targets.length) continue;
 
     const toSend = Math.min(...due);
