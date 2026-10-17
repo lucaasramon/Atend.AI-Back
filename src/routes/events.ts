@@ -46,6 +46,72 @@ router.get("/config", requireEditor, async (_req: Request, res: Response) => {
   }
 });
 
+// GET /api/events/groups  (admin — todos os grupos do robô, indicando os liberados)
+router.get("/groups", requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const cfg = await getReminderSettings();
+    const allowed = await getAllowedGroups();
+    const groups = await fetchGroups(cfg.instance);
+    return res.json(
+      groups
+        .map((g) => ({
+          id: g.id,
+          subject: g.subject,
+          size: g.size,
+          allowed: allowed.includes(g.id),
+          is_default: g.id === cfg.groupJid,
+        }))
+        .sort((a, b) => a.subject.localeCompare(b.subject, "pt-BR"))
+    );
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message || "Erro ao listar grupos" });
+  }
+});
+
+// PUT /api/events/allowed-groups  (admin — define quais grupos podem receber mensagens)
+// Body: { groups: string[] }
+router.put("/allowed-groups", requireAdmin, async (req: Request, res: Response) => {
+  const groups: unknown = req.body?.groups;
+  if (!Array.isArray(groups) || !groups.every((g) => typeof g === "string" && /^\d+@g\.us$/.test(g))) {
+    return res.status(400).json({ error: "groups deve ser uma lista de IDs de grupo (xxx@g.us)" });
+  }
+
+  try {
+    const cfg = await getReminderSettings();
+    const current = await getAllowedGroups();
+    const removed = current.filter((g) => !groups.includes(g));
+
+    if (cfg.groupJid && removed.includes(cfg.groupJid)) {
+      return res.status(400).json({ error: "O grupo padrão não pode ser bloqueado. Escolha outro grupo padrão antes." });
+    }
+
+    if (removed.length) {
+      const inUse = await query<{ title: string }>(
+        "SELECT title FROM events WHERE starts_at > NOW() AND group_jid = ANY($1) ORDER BY starts_at LIMIT 5",
+        [removed]
+      );
+      if (inUse.length) {
+        return res.status(400).json({
+          error: `Há eventos futuros usando esse grupo: ${inUse.map((e) => e.title).join(", ")}. Mude o grupo deles antes.`,
+        });
+      }
+    }
+
+    await query(
+      `INSERT INTO system_settings (key, value, updated_at) VALUES ('allowed_groups', $1, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+      [Array.from(new Set(groups as string[])).join(",")]
+    );
+    await query(
+      `INSERT INTO audit_logs (admin_id, action, target_type, details) VALUES ($1, 'update_allowed_groups', 'whatsapp', $2)`,
+      [req.auth!.userId, JSON.stringify({ groups })]
+    );
+    return res.json({ success: true, groups });
+  } catch (error) {
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
 // GET /api/events  (admin — todos os eventos, com lembretes já enviados)
 router.get("/", requireEditor, async (_req: Request, res: Response) => {
   try {
