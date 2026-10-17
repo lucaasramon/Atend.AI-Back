@@ -1,6 +1,8 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
 
 dotenv.config();
 
@@ -23,6 +25,11 @@ import { startReminderJob } from "./services/reminders";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Versão do package.json (fica em /app/package.json no container e na raiz em dev)
+const VERSION: string = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8")
+).version;
 
 // Webhook da Stripe precisa do raw body ANTES do express.json()
 app.use("/api/billing/webhook", express.raw({ type: "application/json" }));
@@ -59,11 +66,11 @@ app.use("/api/webhook", webhookRoutes);
 app.use("/api/events", eventRoutes);
 
 app.get("/api/health", (_req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+  res.json({ status: "ok", version: VERSION, timestamp: new Date().toISOString() });
 });
 
 app.listen(PORT, () => {
-  console.log(`Backend rodando na porta ${PORT}`);
+  console.log(`Backend v${VERSION} rodando na porta ${PORT}`);
   startReminderJob();
 });
 
