@@ -26,6 +26,8 @@ import ministryRoutes from "./routes/ministries";
 import locationRoutes from "./routes/locations";
 import eventTaskRoutes from "./routes/eventTasks";
 import popRoutes from "./routes/pops";
+import mediaRoutes from "./routes/media";
+import ackRoutes from "./routes/acks";
 import { startScheduler } from "./services/scheduler";
 
 const app = express();
@@ -71,6 +73,8 @@ app.use("/api/webhook", webhookRoutes);
 app.use("/api/events", eventTaskRoutes); // antes de eventRoutes (rotas /tasks, /people...)
 app.use("/api/events", eventRoutes);
 app.use("/api/pops", popRoutes);
+app.use("/api/media", mediaRoutes);
+app.use("/api/acks", ackRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/ministries", ministryRoutes);
 app.use("/api/locations", locationRoutes);

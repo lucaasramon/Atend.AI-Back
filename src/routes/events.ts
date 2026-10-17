@@ -8,6 +8,7 @@ import { eventOffsets, getAllowedGroups, getReminderSettings, parseOffsets, rend
 import { runRemindersIfPastToday } from "../services/scheduler";
 import { previewSummary, SummaryKind } from "../services/summaries";
 import { occurrences, validateRepeat } from "../services/recurrence";
+import { onEventsApproved } from "../services/acks";
 import crypto from "crypto";
 
 const router = Router();
@@ -366,8 +367,10 @@ router.post("/", requireEditor, async (req: Request, res: Response) => {
     }
     const ev = await fullEvent(created[0]);
 
-    if (approved) runRemindersIfPastToday();
-    else notifyApprovers({ ...ev, series_count: created.length }, false).catch((err) => console.error("notifyApprovers:", err));
+    if (approved) {
+      runRemindersIfPastToday();
+      onEventsApproved(created).catch((err) => console.error("onEventsApproved:", err));
+    } else notifyApprovers({ ...ev, series_count: created.length }, false).catch((err) => console.error("notifyApprovers:", err));
     return res.status(201).json({ ...ev, series_count: created.length });
   } catch (error) {
     console.error("Create event error:", error);
@@ -395,7 +398,7 @@ router.post("/import", requireEditor, async (req: Request, res: Response) => {
         .filter(Boolean) as string[];
 
     const errors: { row: number; error: string }[] = [];
-    let createdCount = 0;
+    const createdIds: string[] = [];
     for (const [i, it] of items.entries()) {
       const start = new Date(it.starts_at);
       if (!String(it.title || "").trim() || isNaN(start.getTime())) {
@@ -407,7 +410,7 @@ router.post("/import", requireEditor, async (req: Request, res: Response) => {
         continue;
       }
       try {
-        await insertEvent(
+        const id = await insertEvent(
           {
             title: String(it.title).trim(),
             description: it.description,
@@ -421,15 +424,18 @@ router.post("/import", requireEditor, async (req: Request, res: Response) => {
           },
           req.auth!.userId, approved, isAdmin
         );
-        createdCount++;
+        createdIds.push(id);
       } catch {
         errors.push({ row: i + 1, error: "Não foi possível salvar" });
       }
     }
+    const createdCount = createdIds.length;
 
     if (createdCount) {
-      if (approved) runRemindersIfPastToday();
-      else {
+      if (approved) {
+        runRemindersIfPastToday();
+        onEventsApproved(createdIds).catch((err) => console.error("onEventsApproved:", err));
+      } else {
         notifyUsers(
           await adminIds(),
           `📝 *${createdCount} eventos importados aguardando aprovação*\n\nAprovar: ${appUrl()}/admin/aprovacoes`
@@ -499,6 +505,8 @@ router.patch("/:id", requireEditor, async (req: Request, res: Response) => {
       notifyApprovers(ev, before.status === "approved").catch((err) => console.error("notifyApprovers:", err));
     } else if (ev.status === "approved") {
       runRemindersIfPastToday();
+      // Ministério novo no evento: pede confirmação a ele (os que já confirmaram não recebem de novo)
+      onEventsApproved([req.params.id]).catch((err) => console.error("onEventsApproved:", err));
     }
 
     return res.json(ev);
@@ -523,6 +531,7 @@ router.post("/:id/approve", requireAdmin, async (req: Request, res: Response) =>
     if (!row) return res.status(404).json({ error: "Evento não encontrado" });
     const ev = await fullEvent(row.id);
     runRemindersIfPastToday();
+    onEventsApproved(rows.map((r) => r.id)).catch((err) => console.error("onEventsApproved:", err));
     if (row.created_by && row.created_by !== req.auth!.userId) {
       const series = rows.length > 1 ? ` e mais ${rows.length - 1} data(s) da série` : "";
       notifyUsers([row.created_by], `✅ Seu evento *${ev.title}* (${whenText(ev.starts_at)})${series} foi aprovado e já está na agenda.`)

@@ -7,6 +7,8 @@ import { RUN_TIME, TZ, TZ_OFFSET, localDate, runReminders } from "./reminders";
 import { runSummaries } from "./summaries";
 import { runTaskReminders } from "./tasks";
 import { runPops } from "./pops";
+import { runMediaReminders } from "./media";
+import { runEscalations } from "./acks";
 
 const DAY_MS = 24 * 60 * 60_000;
 const RETRY_MS = 5 * 60_000;
@@ -20,7 +22,10 @@ const DAILY_JOBS: Job[] = [
   { name: "resumos", run: runSummaries },
   { name: "tarefas", run: runTaskReminders },
   { name: "pops", run: runPops },
+  { name: "mídia", run: runMediaReminders },
 ];
+
+const HOUR_MS = 60 * 60_000;
 
 /** true se a rodada de hoje (RUN_TIME) já passou */
 export function isPastTodayRun(now = new Date()): boolean {
@@ -70,7 +75,17 @@ function scheduleNext() {
   console.log(`[agendador] próxima rodada: ${next.toLocaleString("pt-BR", { timeZone: TZ })}`);
 }
 
+/** Escalonamento das confirmações: confere a cada hora os prazos vencidos */
+function startHourly() {
+  setInterval(() => {
+    runEscalations()
+      .then((r) => r.escalated && console.log("[agendador] confirmações:", JSON.stringify(r)))
+      .catch((err) => console.error("[agendador] falha no escalonamento:", err));
+  }, HOUR_MS);
+}
+
 export function startScheduler() {
+  startHourly();
   // Se o servidor subir depois do horário do dia, roda já (recupera envios perdidos; não duplica)
   if (isPastTodayRun()) setTimeout(() => tick(), 10_000);
   scheduleNext();
