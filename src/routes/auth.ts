@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 import { v4 as uuidv4 } from "uuid";
 import { query, queryOne } from "../db";
 import { requireAuth } from "../middleware/auth";
+import { hashToken } from "../services/access";
 
 const router = Router();
 
@@ -16,8 +17,8 @@ router.post("/login", async (req: Request, res: Response) => {
 
   try {
     const user = await queryOne<any>(
-      "SELECT id, email, password_hash, role FROM users WHERE email = $1",
-      [email.toLowerCase()]
+      "SELECT id, email, password_hash, role, must_change_password FROM users WHERE email = $1",
+      [email.trim().toLowerCase()]
     );
 
     if (!user) {
@@ -29,6 +30,13 @@ router.post("/login", async (req: Request, res: Response) => {
       return res.status(401).json({ error: "Email ou senha incorretos" });
     }
 
+    // Senha temporária: não entra, manda definir a senha nova primeiro
+    // (passe de 30 min separado, para não invalidar o link enviado pelo WhatsApp)
+    if (user.must_change_password) {
+      const setupToken = jwt.sign({ userId: user.id, purpose: "setup" }, process.env.JWT_SECRET!, { expiresIn: "30m" });
+      return res.json({ must_change_password: true, setup_token: setupToken });
+    }
+
     const token = jwt.sign(
       { userId: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET!,
@@ -38,6 +46,69 @@ router.post("/login", async (req: Request, res: Response) => {
     return res.json({ token, user: { id: user.id, email: user.email, role: user.role } });
   } catch (error) {
     console.error("Login error:", error);
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
+const SETUP_EXPIRED = "Este link expirou ou já foi usado. Peça um novo acesso ao administrador.";
+
+/**
+ * Usuário dono do token de primeiro acesso. Aceita o link do WhatsApp (token salvo
+ * em hash no banco) ou o passe gerado ao entrar com a senha temporária (JWT de 30 min).
+ */
+async function findSetupUser(token: string) {
+  if (token.includes(".")) {
+    try {
+      const p = jwt.verify(token, process.env.JWT_SECRET!) as { userId: string; purpose?: string };
+      if (p.purpose !== "setup") return null;
+      return queryOne<{ id: string; email: string; full_name: string | null }>(
+        "SELECT id, email, full_name FROM users WHERE id = $1 AND must_change_password = true",
+        [p.userId]
+      );
+    } catch {
+      return null;
+    }
+  }
+  return queryOne<{ id: string; email: string; full_name: string | null }>(
+    "SELECT id, email, full_name FROM users WHERE setup_token_hash = $1 AND setup_token_expires > NOW()",
+    [hashToken(token)]
+  );
+}
+
+// GET /api/auth/setup?token=...  (primeiro acesso: confere o link)
+router.get("/setup", async (req: Request, res: Response) => {
+  const token = String(req.query.token || "");
+  if (!token) return res.status(400).json({ error: "Link inválido" });
+  try {
+    const user = await findSetupUser(token);
+    if (!user) return res.status(400).json({ error: SETUP_EXPIRED });
+    return res.json({ email: user.email, full_name: user.full_name });
+  } catch (error) {
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
+// POST /api/auth/setup  { token, password }  (primeiro acesso: define a senha)
+router.post("/setup", async (req: Request, res: Response) => {
+  const { token, password } = req.body;
+  if (!token) return res.status(400).json({ error: "Link inválido" });
+  if (!password || password.length < 6) return res.status(400).json({ error: "A senha deve ter no mínimo 6 caracteres" });
+  try {
+    const user = await findSetupUser(token);
+    if (!user) return res.status(400).json({ error: SETUP_EXPIRED });
+    // Senha definida: invalida o link e o passe (must_change_password = false)
+    await query(
+      `UPDATE users SET
+         password_hash = $1,
+         must_change_password = false,
+         setup_token_hash = NULL,
+         setup_token_expires = NULL,
+         updated_at = NOW()
+       WHERE id = $2`,
+      [await bcrypt.hash(password, 12), user.id]
+    );
+    return res.json({ success: true, email: user.email });
+  } catch (error) {
     return res.status(500).json({ error: "Erro interno do servidor" });
   }
 });

@@ -6,8 +6,9 @@ import { getAllowedGroups, getReminderSettings, renderMessage, reminderSendAt, r
 
 const router = Router();
 
-// Admin e usuário "agenda" podem gerenciar eventos
+// Admin e usuário "agenda" podem gerenciar eventos; "viewer" só visualiza
 const requireEditor = requireRole("admin", "agenda");
+const requireReader = requireRole("admin", "agenda", "viewer");
 
 const PUBLIC_FIELDS = "id, title, description, location, starts_at, ends_at";
 
@@ -30,7 +31,7 @@ router.get("/public", async (req: Request, res: Response) => {
 });
 
 // GET /api/events/config  (configuração dos lembretes, somente leitura)
-router.get("/config", requireEditor, async (_req: Request, res: Response) => {
+router.get("/config", requireReader, async (_req: Request, res: Response) => {
   try {
     const cfg = await getReminderSettings();
     const allowed = await getAllowedGroups();
@@ -113,7 +114,7 @@ router.put("/allowed-groups", requireAdmin, async (req: Request, res: Response) 
 });
 
 // GET /api/events  (admin — todos os eventos, com lembretes já enviados)
-router.get("/", requireEditor, async (_req: Request, res: Response) => {
+router.get("/", requireReader, async (_req: Request, res: Response) => {
   try {
     const rows = await query(
       `SELECT e.*,
@@ -197,7 +198,7 @@ router.delete("/:id", requireEditor, async (req: Request, res: Response) => {
 });
 
 // GET /api/events/:id/preview  (admin — mostra como ficará a mensagem de cada antecedência)
-router.get("/:id/preview", requireEditor, async (req: Request, res: Response) => {
+router.get("/:id/preview", requireReader, async (req: Request, res: Response) => {
   try {
     const ev = await queryOne<any>("SELECT * FROM events WHERE id = $1", [req.params.id]);
     if (!ev) return res.status(404).json({ error: "Evento não encontrado" });

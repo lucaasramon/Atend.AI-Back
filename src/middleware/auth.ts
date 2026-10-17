@@ -29,8 +29,8 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
     return res.status(401).json({ error: "Token inválido ou expirado" });
   }
 
-  // Usuário "agenda" só acessa a agenda e os próprios dados de login
-  if (payload.role === "agenda" && !AGENDA_PATHS.test(req.originalUrl.split("?")[0])) {
+  // Usuários "agenda" e "viewer" só acessam a agenda e os próprios dados de login
+  if ((payload.role === "agenda" || payload.role === "viewer") && !AGENDA_PATHS.test(req.originalUrl.split("?")[0])) {
     return res.status(403).json({ error: "Acesso negado" });
   }
 

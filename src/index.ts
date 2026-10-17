@@ -21,6 +21,7 @@ import evolutionRoutes from "./routes/evolution";
 import aiRoutes from "./routes/ai";
 import webhookRoutes from "./routes/webhook";
 import eventRoutes from "./routes/events";
+import userRoutes from "./routes/users";
 import { startReminderJob } from "./services/reminders";
 
 const app = express();
@@ -64,6 +65,7 @@ app.use("/api/evolution", evolutionRoutes);
 app.use("/api/ai", aiRoutes);
 app.use("/api/webhook", webhookRoutes);
 app.use("/api/events", eventRoutes);
+app.use("/api/users", userRoutes);
 
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", version: VERSION, timestamp: new Date().toISOString() });
