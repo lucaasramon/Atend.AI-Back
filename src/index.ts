@@ -22,7 +22,7 @@ import aiRoutes from "./routes/ai";
 import webhookRoutes from "./routes/webhook";
 import eventRoutes from "./routes/events";
 import userRoutes from "./routes/users";
-import { startReminderJob } from "./services/reminders";
+import { startScheduler } from "./services/scheduler";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -73,7 +73,7 @@ app.get("/api/health", (_req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Backend v${VERSION} rodando na porta ${PORT}`);
-  startReminderJob();
+  startScheduler();
 });
 
 export default app;
