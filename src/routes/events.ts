@@ -7,8 +7,13 @@ import { adminIds, appUrl, notifyUsers } from "../services/notify";
 import { eventOffsets, getAllowedGroups, getReminderSettings, parseOffsets, renderMessage, reminderSendAt, runReminders, TZ } from "../services/reminders";
 import { runRemindersIfPastToday } from "../services/scheduler";
 import { previewSummary, SummaryKind } from "../services/summaries";
+import { occurrences, validateRepeat } from "../services/recurrence";
+import crypto from "crypto";
 
 const router = Router();
+
+// Categorias (cada uma tem uma cor no calendário)
+const CATEGORIES = ["culto", "conferencia", "reuniao", "ensaio", "evento", "acao_social", "outro"];
 
 // Admin e usuário "agenda" podem gerenciar eventos; "viewer" só visualiza
 const requireEditor = requireRole("admin", "agenda");
@@ -62,7 +67,9 @@ const fullEvent = (id: string) =>
     `SELECT ${EVENT_COLUMNS},
             c.full_name AS created_by_name, a.full_name AS approved_by_name,
             COALESCE((SELECT json_agg(json_build_object('offset_days', r.offset_days, 'status', r.status, 'sent_at', r.sent_at))
-                        FROM event_reminders_sent r WHERE r.event_id = e.id), '[]') AS reminders
+                        FROM event_reminders_sent r WHERE r.event_id = e.id), '[]') AS reminders,
+            (SELECT COUNT(*)::int FROM event_tasks t WHERE t.event_id = e.id) AS tasks_total,
+            (SELECT COUNT(*)::int FROM event_tasks t WHERE t.event_id = e.id AND t.done) AS tasks_done
        FROM events e
        LEFT JOIN users c ON c.id = e.created_by
        LEFT JOIN users a ON a.id = e.approved_by
@@ -83,6 +90,7 @@ async function notifyApprovers(ev: any, changed: boolean) {
     `*${ev.title}*`,
     `🗓️ ${whenText(ev.starts_at)}${where ? `\n📍 ${where}` : ""}`,
     `👤 Cadastrado${who}`,
+    ...(ev.series_count > 1 ? [`🔁 Evento recorrente: ${ev.series_count} datas`] : []),
     "",
     `Aprovar ou recusar: ${appUrl()}/admin/aprovacoes`,
   ].join("\n");
@@ -273,7 +281,9 @@ router.get("/", requireReader, async (_req: Request, res: Response) => {
       `SELECT ${EVENT_COLUMNS},
               c.full_name AS created_by_name, a.full_name AS approved_by_name,
               COALESCE((SELECT json_agg(json_build_object('offset_days', r.offset_days, 'status', r.status, 'sent_at', r.sent_at))
-                          FROM event_reminders_sent r WHERE r.event_id = e.id), '[]') AS reminders
+                          FROM event_reminders_sent r WHERE r.event_id = e.id), '[]') AS reminders,
+            (SELECT COUNT(*)::int FROM event_tasks t WHERE t.event_id = e.id) AS tasks_total,
+            (SELECT COUNT(*)::int FROM event_tasks t WHERE t.event_id = e.id AND t.done) AS tasks_done
          FROM events e
          LEFT JOIN users c ON c.id = e.created_by
          LEFT JOIN users a ON a.id = e.approved_by
@@ -285,50 +295,161 @@ router.get("/", requireReader, async (_req: Request, res: Response) => {
   }
 });
 
-// POST /api/events
+interface NewEvent {
+  title: string;
+  description?: string | null;
+  location?: string | null;
+  starts_at: Date | string;
+  ends_at?: Date | string | null;
+  is_public?: boolean;
+  group_jid?: string | null;
+  reminder_offsets?: number[] | null;
+  category?: string | null;
+  series_id?: string | null;
+  ministry_ids?: string[];
+  location_ids?: string[];
+}
+
+/** Cria um evento com vínculos; se o vínculo falhar, desfaz (não deixa evento pela metade) */
+async function insertEvent(e: NewEvent, userId: string, approved: boolean, isAdmin: boolean): Promise<string> {
+  const row = await queryOne<{ id: string }>(
+    `INSERT INTO events (title, description, location, starts_at, ends_at, is_public, group_jid, reminder_offsets,
+                         category, series_id, created_by, status, approved_by, approved_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::varchar, $13, CASE WHEN $12::varchar = 'approved' THEN NOW() END)
+     RETURNING id`,
+    [
+      e.title, e.description || null, e.location || null, e.starts_at, e.ends_at || null, e.is_public ?? true,
+      e.group_jid || null, e.reminder_offsets ?? null, e.category || null, e.series_id || null, userId,
+      approved ? "approved" : "pending", approved && isAdmin ? userId : null,
+    ]
+  );
+  try {
+    await setLinks(row!.id, e.ministry_ids, e.location_ids);
+  } catch (err) {
+    await query("DELETE FROM events WHERE id = $1", [row!.id]).catch(() => {});
+    throw err;
+  }
+  return row!.id;
+}
+
+// POST /api/events  (com "repeat" cria a série de eventos recorrentes)
 router.post("/", requireEditor, async (req: Request, res: Response) => {
-  const { title, description, location, starts_at, ends_at, is_public, group_jid } = req.body;
+  const { title, description, location, starts_at, ends_at, is_public, group_jid, category, repeat } = req.body;
   const offsets = bodyOffsets(req.body.reminder_offsets);
   if (!title || !starts_at) return res.status(400).json({ error: "title e starts_at são obrigatórios" });
+  if (category && !CATEGORIES.includes(category)) return res.status(400).json({ error: "Categoria inválida" });
+  const repeatError = validateRepeat(repeat);
+  if (repeatError) return res.status(400).json({ error: repeatError });
   if (group_jid && !(await getAllowedGroups()).includes(group_jid)) {
     return res.status(400).json({ error: "group_jid não permitido: use um grupo de allowed_groups" });
   }
 
-  let createdId: string | undefined;
+  const created: string[] = [];
   try {
     const isAdmin = req.auth!.role === "admin";
     const approved = isAdmin || !(await approvalRequired());
-    const row = await queryOne<{ id: string }>(
-      `INSERT INTO events (title, description, location, starts_at, ends_at, is_public, group_jid, reminder_offsets,
-                           created_by, status, approved_by, approved_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::varchar, $11, CASE WHEN $10::varchar = 'approved' THEN NOW() END) RETURNING id`,
-      [
-        title, description || null, location || null, starts_at, ends_at || null, is_public ?? true,
-        group_jid || null, offsets.value, req.auth!.userId,
-        approved ? "approved" : "pending", approved && isAdmin ? req.auth!.userId : null,
-      ]
-    );
-    createdId = row!.id;
-    await setLinks(row!.id, bodyIds(req.body.ministry_ids), bodyIds(req.body.location_ids));
-    const ev = await fullEvent(row!.id);
+    const base: NewEvent = {
+      title, description, location, starts_at, ends_at, is_public, group_jid, category,
+      reminder_offsets: offsets.value,
+      ministry_ids: bodyIds(req.body.ministry_ids),
+      location_ids: bodyIds(req.body.location_ids),
+    };
+
+    const dates = repeat
+      ? occurrences(new Date(starts_at), ends_at ? new Date(ends_at) : null, repeat)
+      : [{ starts_at: new Date(starts_at), ends_at: ends_at ? new Date(ends_at) : null }];
+    if (!dates.length) return res.status(400).json({ error: "Nenhuma data no período de repetição" });
+    const seriesId = dates.length > 1 ? crypto.randomUUID() : null;
+
+    for (const d of dates) {
+      created.push(await insertEvent({ ...base, ...d, series_id: seriesId }, req.auth!.userId, approved, isAdmin));
+    }
+    const ev = await fullEvent(created[0]);
 
     if (approved) runRemindersIfPastToday();
-    else notifyApprovers(ev, false).catch((err) => console.error("notifyApprovers:", err));
-    return res.status(201).json(ev);
+    else notifyApprovers({ ...ev, series_count: created.length }, false).catch((err) => console.error("notifyApprovers:", err));
+    return res.status(201).json({ ...ev, series_count: created.length });
   } catch (error) {
     console.error("Create event error:", error);
-    // Falhou ao vincular ministérios/locais: não deixa o evento pela metade
-    if (createdId) await query("DELETE FROM events WHERE id = $1", [createdId]).catch(() => {});
+    // Falhou no meio da série: desfaz o que já foi criado
+    if (created.length) await query("DELETE FROM events WHERE id = ANY($1)", [created]).catch(() => {});
     return res.status(400).json({ error: "Dados inválidos" });
+  }
+});
+
+// POST /api/events/import  { events: [...] }  (calendário anual em lote)
+// Cada item: { title, starts_at, ends_at?, location?, description?, category?, is_public?, ministries?: nomes[], locations?: nomes[] }
+router.post("/import", requireEditor, async (req: Request, res: Response) => {
+  const items: any[] = Array.isArray(req.body.events) ? req.body.events : [];
+  if (!items.length) return res.status(400).json({ error: "Nenhum evento para importar" });
+  if (items.length > 500) return res.status(400).json({ error: "Máximo de 500 eventos por importação" });
+
+  try {
+    const isAdmin = req.auth!.role === "admin";
+    const approved = isAdmin || !(await approvalRequired());
+    const ministries = await query<{ id: string; name: string }>("SELECT id, name FROM ministries");
+    const locations = await query<{ id: string; name: string }>("SELECT id, name FROM locations");
+    const byName = (list: { id: string; name: string }[], names: unknown) =>
+      (Array.isArray(names) ? names : [])
+        .map((n) => list.find((x) => x.name.toLowerCase() === String(n).trim().toLowerCase())?.id)
+        .filter(Boolean) as string[];
+
+    const errors: { row: number; error: string }[] = [];
+    let createdCount = 0;
+    for (const [i, it] of items.entries()) {
+      const start = new Date(it.starts_at);
+      if (!String(it.title || "").trim() || isNaN(start.getTime())) {
+        errors.push({ row: i + 1, error: "Título ou data inválidos" });
+        continue;
+      }
+      if (it.category && !CATEGORIES.includes(it.category)) {
+        errors.push({ row: i + 1, error: `Categoria inválida: ${it.category}` });
+        continue;
+      }
+      try {
+        await insertEvent(
+          {
+            title: String(it.title).trim(),
+            description: it.description,
+            location: it.location,
+            starts_at: start,
+            ends_at: it.ends_at ? new Date(it.ends_at) : null,
+            is_public: it.is_public !== false,
+            category: it.category || null,
+            ministry_ids: byName(ministries, it.ministries),
+            location_ids: byName(locations, it.locations),
+          },
+          req.auth!.userId, approved, isAdmin
+        );
+        createdCount++;
+      } catch {
+        errors.push({ row: i + 1, error: "Não foi possível salvar" });
+      }
+    }
+
+    if (createdCount) {
+      if (approved) runRemindersIfPastToday();
+      else {
+        notifyUsers(
+          await adminIds(),
+          `📝 *${createdCount} eventos importados aguardando aprovação*\n\nAprovar: ${appUrl()}/admin/aprovacoes`
+        ).catch(() => {});
+      }
+    }
+    return res.json({ created: createdCount, errors, status: approved ? "approved" : "pending" });
+  } catch (error) {
+    console.error("Import events error:", error);
+    return res.status(500).json({ error: "Erro interno do servidor" });
   }
 });
 
 // PATCH /api/events/:id
 router.patch("/:id", requireEditor, async (req: Request, res: Response) => {
-  const { title, description, location, starts_at, ends_at, is_public, group_jid } = req.body;
+  const { title, description, location, starts_at, ends_at, is_public, group_jid, category } = req.body;
   const offsets = bodyOffsets(req.body.reminder_offsets);
   const ministryIds = bodyIds(req.body.ministry_ids);
   const locationIds = bodyIds(req.body.location_ids);
+  if (category && !CATEGORIES.includes(category)) return res.status(400).json({ error: "Categoria inválida" });
   if (group_jid && !(await getAllowedGroups()).includes(group_jid)) {
     return res.status(400).json({ error: "group_jid não permitido: use um grupo de allowed_groups" });
   }
@@ -345,10 +466,12 @@ router.patch("/:id", requireEditor, async (req: Request, res: Response) => {
          ends_at = CASE WHEN $11 THEN $5::timestamptz ELSE ends_at END,
          is_public = COALESCE($6, is_public),
          group_jid = CASE WHEN $8::text IS NULL THEN group_jid ELSE NULLIF($8, '') END,
-         reminder_offsets = CASE WHEN $9 THEN $10::int[] ELSE reminder_offsets END
+         reminder_offsets = CASE WHEN $9 THEN $10::int[] ELSE reminder_offsets END,
+         category = CASE WHEN $12 THEN NULLIF($13, '') ELSE category END
        WHERE id = $7`,
       [title ?? null, description ?? null, location ?? null, starts_at ?? null, ends_at ?? null, is_public ?? null,
-       req.params.id, group_jid ?? null, offsets.set, offsets.value, "ends_at" in req.body]
+       req.params.id, group_jid ?? null, offsets.set, offsets.value, "ends_at" in req.body,
+       "category" in req.body, category ?? ""]
     );
     await setLinks(req.params.id, ministryIds, locationIds);
     let ev = await fullEvent(req.params.id);
@@ -384,22 +507,28 @@ router.patch("/:id", requireEditor, async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/events/:id/approve  (admin)
+/** O evento e, se for de uma série, as demais datas pendentes da mesma série */
+const SAME_SERIES_PENDING = `(id = $2 OR (status = 'pending' AND series_id IS NOT NULL
+                                AND series_id = (SELECT series_id FROM events WHERE id = $2)))`;
+
+// POST /api/events/:id/approve  (admin — aprova também as datas pendentes da mesma série)
 router.post("/:id/approve", requireAdmin, async (req: Request, res: Response) => {
   try {
-    const row = await queryOne<{ id: string; created_by: string | null }>(
+    const rows = await query<{ id: string; created_by: string | null }>(
       `UPDATE events SET status = 'approved', approved_by = $1, approved_at = NOW(), rejection_reason = NULL
-        WHERE id = $2 RETURNING id, created_by`,
+        WHERE ${SAME_SERIES_PENDING} RETURNING id, created_by`,
       [req.auth!.userId, req.params.id]
     );
+    const row = rows.find((r) => r.id === req.params.id);
     if (!row) return res.status(404).json({ error: "Evento não encontrado" });
     const ev = await fullEvent(row.id);
     runRemindersIfPastToday();
     if (row.created_by && row.created_by !== req.auth!.userId) {
-      notifyUsers([row.created_by], `✅ Seu evento *${ev.title}* (${whenText(ev.starts_at)}) foi aprovado e já está na agenda.`)
+      const series = rows.length > 1 ? ` e mais ${rows.length - 1} data(s) da série` : "";
+      notifyUsers([row.created_by], `✅ Seu evento *${ev.title}* (${whenText(ev.starts_at)})${series} foi aprovado e já está na agenda.`)
         .catch(() => {});
     }
-    return res.json(ev);
+    return res.json({ ...ev, approved_count: rows.length });
   } catch (error) {
     return res.status(500).json({ error: "Erro interno do servidor" });
   }
@@ -409,11 +538,12 @@ router.post("/:id/approve", requireAdmin, async (req: Request, res: Response) =>
 router.post("/:id/reject", requireAdmin, async (req: Request, res: Response) => {
   const reason = String(req.body.reason || "").trim();
   try {
-    const row = await queryOne<{ id: string; created_by: string | null }>(
-      `UPDATE events SET status = 'rejected', approved_by = $1, approved_at = NOW(), rejection_reason = NULLIF($2, '')
-        WHERE id = $3 RETURNING id, created_by`,
-      [req.auth!.userId, reason, req.params.id]
+    const rows = await query<{ id: string; created_by: string | null }>(
+      `UPDATE events SET status = 'rejected', approved_by = $1, approved_at = NOW(), rejection_reason = NULLIF($3, '')
+        WHERE ${SAME_SERIES_PENDING} RETURNING id, created_by`,
+      [req.auth!.userId, req.params.id, reason]
     );
+    const row = rows.find((r) => r.id === req.params.id);
     if (!row) return res.status(404).json({ error: "Evento não encontrado" });
     const ev = await fullEvent(row.id);
     if (row.created_by && row.created_by !== req.auth!.userId) {
@@ -428,11 +558,22 @@ router.post("/:id/reject", requireAdmin, async (req: Request, res: Response) => 
   }
 });
 
-// DELETE /api/events/:id
+// DELETE /api/events/:id?scope=future  (future: esta e as próximas datas da mesma série)
 router.delete("/:id", requireEditor, async (req: Request, res: Response) => {
   try {
-    await query("DELETE FROM events WHERE id = $1", [req.params.id]);
-    return res.json({ success: true });
+    const rows =
+      req.query.scope === "future"
+        ? await query(
+            `DELETE FROM events
+              WHERE id = $1
+                 OR (series_id IS NOT NULL
+                     AND series_id = (SELECT series_id FROM events WHERE id = $1)
+                     AND starts_at >= (SELECT starts_at FROM events WHERE id = $1))
+              RETURNING id`,
+            [req.params.id]
+          )
+        : await query("DELETE FROM events WHERE id = $1 RETURNING id", [req.params.id]);
+    return res.json({ success: true, deleted: rows.length });
   } catch (error) {
     return res.status(500).json({ error: "Erro interno do servidor" });
   }

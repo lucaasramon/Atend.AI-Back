@@ -5,6 +5,8 @@
  */
 import { RUN_TIME, TZ, TZ_OFFSET, localDate, runReminders } from "./reminders";
 import { runSummaries } from "./summaries";
+import { runTaskReminders } from "./tasks";
+import { runPops } from "./pops";
 
 const DAY_MS = 24 * 60 * 60_000;
 const RETRY_MS = 5 * 60_000;
@@ -16,6 +18,8 @@ type Job = { name: string; run: () => Promise<unknown> };
 const DAILY_JOBS: Job[] = [
   { name: "lembretes", run: runReminders },
   { name: "resumos", run: runSummaries },
+  { name: "tarefas", run: runTaskReminders },
+  { name: "pops", run: runPops },
 ];
 
 /** true se a rodada de hoje (RUN_TIME) já passou */
