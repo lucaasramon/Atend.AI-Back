@@ -9,6 +9,7 @@ import { runTaskReminders } from "./tasks";
 import { runPops } from "./pops";
 import { runMediaReminders } from "./media";
 import { runEscalations } from "./acks";
+import { runRosterNotifications } from "./roster";
 
 const DAY_MS = 24 * 60 * 60_000;
 const RETRY_MS = 5 * 60_000;
@@ -23,6 +24,7 @@ const DAILY_JOBS: Job[] = [
   { name: "tarefas", run: runTaskReminders },
   { name: "pops", run: runPops },
   { name: "mídia", run: runMediaReminders },
+  { name: "escalas", run: runRosterNotifications },
 ];
 
 const HOUR_MS = 60 * 60_000;

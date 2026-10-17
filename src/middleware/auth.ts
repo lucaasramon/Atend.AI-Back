@@ -38,7 +38,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-const AGENDA_PATHS = /^\/api\/(auth\/me|(events|ministries|locations|pops|media)(\/.*)?)$/;
+const AGENDA_PATHS = /^\/api\/(auth\/me|(events|ministries|locations|pops|media|members|areas)(\/.*)?)$/;
 
 /** Exige um dos tipos de usuário informados */
 export function requireRole(...roles: string[]) {
