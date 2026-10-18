@@ -154,7 +154,7 @@ export async function runReminders(): Promise<{ sent: number; skipped: number; e
     `SELECT ${EVENT_COLUMNS},
             COALESCE((SELECT array_agg(r.offset_days) FROM event_reminders_sent r WHERE r.event_id = e.id), '{}') AS sent_offsets
        FROM events e
-      WHERE e.starts_at > NOW() AND e.status = 'approved'`
+      WHERE e.starts_at > NOW() AND e.status = 'approved' AND NOT e.reminders_off`
   );
 
   const now = new Date();

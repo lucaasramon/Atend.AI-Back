@@ -319,6 +319,7 @@ interface NewEvent {
   is_public?: boolean;
   group_jid?: string | null;
   reminder_offsets?: number[] | null;
+  reminders_off?: boolean;
   category?: string | null;
   series_id?: string | null;
   ministry_ids?: string[];
@@ -329,13 +330,13 @@ interface NewEvent {
 async function insertEvent(e: NewEvent, userId: string, approved: boolean, isAdmin: boolean): Promise<string> {
   const row = await queryOne<{ id: string }>(
     `INSERT INTO events (title, description, location, starts_at, ends_at, is_public, group_jid, reminder_offsets,
-                         category, series_id, created_by, status, approved_by, approved_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::varchar, $13, CASE WHEN $12::varchar = 'approved' THEN NOW() END)
+                         category, series_id, created_by, status, approved_by, approved_at, reminders_off)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::varchar, $13, CASE WHEN $12::varchar = 'approved' THEN NOW() END, $14)
      RETURNING id`,
     [
       e.title, e.description || null, e.location || null, e.starts_at, e.ends_at || null, e.is_public ?? true,
       e.group_jid || null, e.reminder_offsets ?? null, e.category || null, e.series_id || null, userId,
-      approved ? "approved" : "pending", approved && isAdmin ? userId : null,
+      approved ? "approved" : "pending", approved && isAdmin ? userId : null, !!e.reminders_off,
     ]
   );
   try {
@@ -370,6 +371,7 @@ router.post("/", requireEditor, async (req: Request, res: Response) => {
     const base: NewEvent = {
       title, description, location, starts_at, ends_at, is_public, group_jid, category,
       reminder_offsets: offsets.value,
+      reminders_off: req.body.reminders_off === true,
       ministry_ids: bodyIds(req.body.ministry_ids),
       location_ids: bodyIds(req.body.location_ids),
     };
@@ -523,11 +525,12 @@ router.patch("/:id", requireEditor, async (req: Request, res: Response) => {
          is_public = COALESCE($6, is_public),
          group_jid = CASE WHEN $8::text IS NULL THEN group_jid ELSE NULLIF($8, '') END,
          reminder_offsets = CASE WHEN $9 THEN $10::int[] ELSE reminder_offsets END,
-         category = CASE WHEN $12 THEN NULLIF($13, '') ELSE category END
+         category = CASE WHEN $12 THEN NULLIF($13, '') ELSE category END,
+         reminders_off = COALESCE($14, reminders_off)
        WHERE id = $7`,
       [title ?? null, description ?? null, location ?? null, starts_at ?? null, ends_at ?? null, is_public ?? null,
        req.params.id, group_jid ?? null, offsets.set, offsets.value, "ends_at" in req.body,
-       "category" in req.body, category ?? ""]
+       "category" in req.body, category ?? "", typeof req.body.reminders_off === "boolean" ? req.body.reminders_off : null]
     );
     await setLinks(req.params.id, ministryIds, locationIds);
     let ev = await fullEvent(req.params.id);
@@ -646,6 +649,7 @@ router.get("/:id/preview", requireReader, async (req: Request, res: Response) =>
   try {
     const ev = await fullEvent(req.params.id);
     if (!ev) return res.status(404).json({ error: "Evento não encontrado" });
+    if (ev.reminders_off) return res.json([]); // evento sem lembretes
     const cfg = await getReminderSettings();
     return res.json(
       eventOffsets(ev, cfg).map((off) => ({
