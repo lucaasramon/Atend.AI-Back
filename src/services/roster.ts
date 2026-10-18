@@ -15,7 +15,8 @@ interface EntryDetails {
   checked: number[];
   member_name: string;
   whatsapp: string | null;
-  area: string;
+  area: string | null;
+  task: string | null;
   ministry: string;
   event_title: string;
   starts_at: Date;
@@ -25,14 +26,17 @@ interface EntryDetails {
 }
 
 const ENTRY_SELECT = `
-  SELECT r.id, r.checked, mb.name AS member_name, mb.whatsapp, a.name AS area, m.name AS ministry,
+  SELECT r.id, r.checked, r.task, mb.name AS member_name, mb.whatsapp, a.name AS area, m.name AS ministry,
          e.title AS event_title, e.starts_at, e.location, p.steps, p.title AS pop_title
     FROM roster_entries r
     JOIN members mb ON mb.id = r.member_id
-    JOIN service_areas a ON a.id = r.area_id
-    JOIN ministries m ON m.id = a.ministry_id
+    JOIN ministries m ON m.id = r.ministry_id
     JOIN events e ON e.id = r.event_id
+    LEFT JOIN service_areas a ON a.id = r.area_id
     LEFT JOIN pops p ON p.id = a.pop_id`;
+
+/** "Louvor · Vocal" (função escrita na escala, ou a função de serviço cadastrada) */
+const roleLine = (d: Pick<EntryDetails, "ministry" | "task" | "area">) => [d.ministry, d.task || d.area].filter(Boolean).join(" · ");
 
 /** Gera um link novo e envia o checklist ao membro */
 export async function sendRosterEntry(entryId: string): Promise<boolean> {
@@ -51,7 +55,7 @@ export async function sendRosterEntry(entryId: string): Promise<boolean> {
     `🙌 Olá, ${first}! Você está escalado(a):`,
     "",
     `📅 *${d.event_title}* — ${when}`,
-    `🎯 ${d.ministry} · ${d.area}`,
+    `🎯 ${roleLine(d)}`,
     ...(steps.length ? ["", `📋 *Seu checklist${d.pop_title ? ` (${d.pop_title})` : ""}:*`, ...steps.map((s) => `☐ ${s}`)] : []),
     "",
     `✅ ${steps.length ? "Marque os itens" : "Confirme sua presença"} aqui: ${appUrl()}/checklist?token=${token}`,
@@ -87,7 +91,7 @@ export async function rosterInfo(token: string) {
     starts_at: d.starts_at,
     location: d.location,
     ministry: d.ministry,
-    area: d.area,
+    area: d.task || d.area || "",
     pop_title: d.pop_title,
     steps: d.steps || [],
     checked: d.checked,

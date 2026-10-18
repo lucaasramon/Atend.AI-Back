@@ -5,6 +5,7 @@ import { query, queryOne } from "../db";
 import { requireAdmin } from "../middleware/auth";
 import { issueTemporaryAccess, resolveWhatsapp, sendAccessMessage } from "../services/access";
 import { CHURCH_ROLES, setUserMinistries } from "../services/userAreas";
+import { syncMemberFromUser } from "../services/members";
 
 const router = Router();
 
@@ -89,6 +90,7 @@ router.post("/", requireAdmin, async (req: Request, res: Response) => {
       [email.trim().toLowerCase(), await bcrypt.hash(crypto.randomBytes(16).toString("hex"), 12), role, full_name.trim(), number, church_role || null]
     );
     await setUserMinistries(created!.id, cleanIds(req.body.ministry_ids));
+    await syncMemberFromUser(created!.id); // já vira membro das escalas
     const user = await getUser(created!.id);
 
     const access = await grantAccess(user);
@@ -133,6 +135,7 @@ router.patch("/:id", requireAdmin, async (req: Request, res: Response) => {
     await audit(req.auth!.userId, "update_user", req.params.id, {
       full_name, whatsapp: number, role, church_role: req.body.church_role, ministry_ids: req.body.ministry_ids,
     });
+    await syncMemberFromUser(req.params.id);
     return res.json(await getUser(req.params.id));
   } catch (error: any) {
     if (error.status) return res.status(error.status).json({ error: error.message });
