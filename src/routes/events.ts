@@ -7,7 +7,7 @@ import { adminIds, appUrl, notifyUsers } from "../services/notify";
 import { eventOffsets, getAllowedGroups, getReminderSettings, parseOffsets, renderMessage, reminderSendAt, runReminders, TZ } from "../services/reminders";
 import { runRemindersIfPastToday } from "../services/scheduler";
 import { previewSummary, SummaryKind } from "../services/summaries";
-import { occurrences, validateRepeat } from "../services/recurrence";
+import { isRepeatSpec, occurrences, occurrencesFromSpec, validateRepeat, validateRepeatSpec } from "../services/recurrence";
 import { onEventsApproved } from "../services/acks";
 import { canManageEvent, userMinistryIds } from "../services/userAreas";
 import crypto from "crypto";
@@ -351,9 +351,11 @@ async function insertEvent(e: NewEvent, userId: string, approved: boolean, isAdm
 router.post("/", requireEditor, async (req: Request, res: Response) => {
   const { title, description, location, starts_at, ends_at, is_public, group_jid, category, repeat } = req.body;
   const offsets = bodyOffsets(req.body.reminder_offsets);
-  if (!title || !starts_at) return res.status(400).json({ error: "title e starts_at são obrigatórios" });
+  // Repetição parametrizada: datas e horários vêm dos parâmetros (starts_at não é usado)
+  const spec = isRepeatSpec(repeat) ? repeat : null;
+  if (!title || (!starts_at && !spec)) return res.status(400).json({ error: "title e starts_at são obrigatórios" });
   if (category && !CATEGORIES.includes(category)) return res.status(400).json({ error: "Categoria inválida" });
-  const repeatError = validateRepeat(repeat);
+  const repeatError = spec ? validateRepeatSpec(spec) : validateRepeat(repeat);
   if (repeatError) return res.status(400).json({ error: repeatError });
   if (group_jid && !(await getAllowedGroups()).includes(group_jid)) {
     return res.status(400).json({ error: "group_jid não permitido: use um grupo de allowed_groups" });
@@ -372,9 +374,11 @@ router.post("/", requireEditor, async (req: Request, res: Response) => {
       location_ids: bodyIds(req.body.location_ids),
     };
 
-    const dates = repeat
-      ? occurrences(new Date(starts_at), ends_at ? new Date(ends_at) : null, repeat)
-      : [{ starts_at: new Date(starts_at), ends_at: ends_at ? new Date(ends_at) : null }];
+    const dates = spec
+      ? occurrencesFromSpec(spec)
+      : repeat
+        ? occurrences(new Date(starts_at), ends_at ? new Date(ends_at) : null, repeat)
+        : [{ starts_at: new Date(starts_at), ends_at: ends_at ? new Date(ends_at) : null }];
     if (!dates.length) return res.status(400).json({ error: "Nenhuma data no período de repetição" });
     const seriesId = dates.length > 1 ? crypto.randomUUID() : null;
 
