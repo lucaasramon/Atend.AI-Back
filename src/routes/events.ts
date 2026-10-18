@@ -9,9 +9,23 @@ import { runRemindersIfPastToday } from "../services/scheduler";
 import { previewSummary, SummaryKind } from "../services/summaries";
 import { occurrences, validateRepeat } from "../services/recurrence";
 import { onEventsApproved } from "../services/acks";
+import { canManageEvent, userMinistryIds } from "../services/userAreas";
 import crypto from "crypto";
 
 const router = Router();
+
+const NO_AREA = "Seu usuário ainda não tem área definida. Peça a um administrador para incluir sua área em Usuários.";
+const NOT_YOUR_AREA = "Você só pode alterar eventos das suas áreas.";
+
+/** Quem não é admin só cria eventos das suas áreas (e precisa escolher pelo menos uma) */
+async function checkOwnAreas(req: Request, chosen: string[]): Promise<{ status: number; error: string } | null> {
+  if (req.auth!.role === "admin") return null;
+  const own = await userMinistryIds(req.auth!.userId);
+  if (!own.length) return { status: 403, error: NO_AREA };
+  if (!chosen.length) return { status: 400, error: "Escolha a área (ministério) do evento" };
+  if (chosen.some((id) => !own.includes(id))) return { status: 403, error: "Você só pode criar eventos das suas áreas." };
+  return null;
+}
 
 // Categorias (cada uma tem uma cor no calendário)
 const CATEGORIES = ["culto", "conferencia", "reuniao", "ensaio", "evento", "acao_social", "outro"];
@@ -348,6 +362,8 @@ router.post("/", requireEditor, async (req: Request, res: Response) => {
   const created: string[] = [];
   try {
     const isAdmin = req.auth!.role === "admin";
+    const areaError = await checkOwnAreas(req, bodyIds(req.body.ministry_ids) || []);
+    if (areaError) return res.status(areaError.status).json({ error: areaError.error });
     const approved = isAdmin || !(await approvalRequired());
     const base: NewEvent = {
       title, description, location, starts_at, ends_at, is_public, group_jid, category,
@@ -397,9 +413,27 @@ router.post("/import", requireEditor, async (req: Request, res: Response) => {
         .map((n) => list.find((x) => x.name.toLowerCase() === String(n).trim().toLowerCase())?.id)
         .filter(Boolean) as string[];
 
+    // Quem não é admin só importa eventos das suas áreas
+    const own = isAdmin ? null : await userMinistryIds(req.auth!.userId);
+    if (own && !own.length) return res.status(403).json({ error: NO_AREA });
+
     const errors: { row: number; error: string }[] = [];
     const createdIds: string[] = [];
     for (const [i, it] of items.entries()) {
+      let ministryIds = byName(ministries, it.ministries);
+      if (own) {
+        const asked = Array.isArray(it.ministries) && it.ministries.length > 0;
+        if (ministryIds.some((id) => !own.includes(id)) || (asked && !ministryIds.length)) {
+          errors.push({ row: i + 1, error: "Você só pode importar eventos das suas áreas" });
+          continue;
+        }
+        // Coluna vazia: usa a área da pessoa (se ela tiver uma só)
+        if (!ministryIds.length && own.length === 1) ministryIds = own;
+        if (!ministryIds.length) {
+          errors.push({ row: i + 1, error: "Informe uma das suas áreas na coluna ministerios" });
+          continue;
+        }
+      }
       const start = new Date(it.starts_at);
       if (!String(it.title || "").trim() || isNaN(start.getTime())) {
         errors.push({ row: i + 1, error: "Título ou data inválidos" });
@@ -419,7 +453,7 @@ router.post("/import", requireEditor, async (req: Request, res: Response) => {
             ends_at: it.ends_at ? new Date(it.ends_at) : null,
             is_public: it.is_public !== false,
             category: it.category || null,
-            ministry_ids: byName(ministries, it.ministries),
+            ministry_ids: ministryIds,
             location_ids: byName(locations, it.locations),
           },
           req.auth!.userId, approved, isAdmin
@@ -453,7 +487,7 @@ router.post("/import", requireEditor, async (req: Request, res: Response) => {
 router.patch("/:id", requireEditor, async (req: Request, res: Response) => {
   const { title, description, location, starts_at, ends_at, is_public, group_jid, category } = req.body;
   const offsets = bodyOffsets(req.body.reminder_offsets);
-  const ministryIds = bodyIds(req.body.ministry_ids);
+  let ministryIds = bodyIds(req.body.ministry_ids);
   const locationIds = bodyIds(req.body.location_ids);
   if (category && !CATEGORIES.includes(category)) return res.status(400).json({ error: "Categoria inválida" });
   if (group_jid && !(await getAllowedGroups()).includes(group_jid)) {
@@ -462,6 +496,18 @@ router.patch("/:id", requireEditor, async (req: Request, res: Response) => {
   try {
     const before = await fullEvent(req.params.id);
     if (!before) return res.status(404).json({ error: "Evento não encontrado" });
+    if (!(await canManageEvent(req.auth!.userId, req.auth!.role, req.params.id))) {
+      return res.status(403).json({ error: NOT_YOUR_AREA });
+    }
+
+    // Quem não é admin só mexe nas suas áreas; as áreas dos outros no evento ficam como estão
+    if (req.auth!.role !== "admin" && ministryIds) {
+      const own = await userMinistryIds(req.auth!.userId);
+      const chosen = ministryIds.filter((id) => own.includes(id));
+      if (!chosen.length) return res.status(400).json({ error: "Escolha pelo menos uma das suas áreas" });
+      const foreign = (before.ministries as { id: string }[]).map((m) => m.id).filter((id) => !own.includes(id));
+      ministryIds = [...chosen, ...foreign];
+    }
 
     await queryOne(
       `UPDATE events SET
@@ -570,6 +616,9 @@ router.post("/:id/reject", requireAdmin, async (req: Request, res: Response) => 
 // DELETE /api/events/:id?scope=future  (future: esta e as próximas datas da mesma série)
 router.delete("/:id", requireEditor, async (req: Request, res: Response) => {
   try {
+    if (!(await canManageEvent(req.auth!.userId, req.auth!.role, req.params.id))) {
+      return res.status(403).json({ error: NOT_YOUR_AREA });
+    }
     const rows =
       req.query.scope === "future"
         ? await query(

@@ -160,11 +160,13 @@ router.post("/signup", async (req: Request, res: Response) => {
 router.get("/me", requireAuth, async (req: Request, res: Response) => {
   try {
     const user = await queryOne<any>(
-      "SELECT id, email, role FROM users WHERE id = $1",
+      `SELECT id, email, role, full_name, church_role,
+              COALESCE((SELECT array_agg(ministry_id) FROM user_ministries WHERE user_id = users.id), '{}') AS ministry_ids
+         FROM users WHERE id = $1`,
       [req.auth!.userId]
     );
     if (!user) return res.status(404).json({ error: "Usuário não encontrado" });
-    return res.json({ id: user.id, email: user.email, role: user.role });
+    return res.json(user);
   } catch (error) {
     return res.status(500).json({ error: "Erro interno do servidor" });
   }

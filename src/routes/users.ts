@@ -4,12 +4,27 @@ import crypto from "crypto";
 import { query, queryOne } from "../db";
 import { requireAdmin } from "../middleware/auth";
 import { issueTemporaryAccess, resolveWhatsapp, sendAccessMessage } from "../services/access";
+import { CHURCH_ROLES, setUserMinistries } from "../services/userAreas";
 
 const router = Router();
 
 // Perfis da equipe (o perfil "user" é cliente e fica na tela de Clientes)
 const TEAM_ROLES = ["admin", "agenda", "viewer"];
-const FIELDS = "id, email, full_name, whatsapp, role, must_change_password, created_at";
+const FIELDS = `id, email, full_name, whatsapp, role, church_role, must_change_password, created_at,
+  (SELECT COALESCE(json_agg(json_build_object('id', m.id, 'name', m.name, 'color', m.color) ORDER BY m.name), '[]')
+     FROM user_ministries um JOIN ministries m ON m.id = um.ministry_id WHERE um.user_id = users.id) AS ministries`;
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const cleanIds = (v: unknown) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" && UUID_RE.test(x)) : []);
+
+/** Valida função e áreas enviadas no corpo */
+function checkProfile(b: any): string | null {
+  if (b.church_role && !CHURCH_ROLES.includes(b.church_role)) return "Função inválida";
+  if (b.ministry_ids !== undefined && !Array.isArray(b.ministry_ids)) return "Áreas inválidas";
+  return null;
+}
+
+const getUser = (id: string) => queryOne<any>(`SELECT ${FIELDS} FROM users WHERE id = $1`, [id]);
 
 const audit = (adminId: string, action: string, targetId: string, details: object) =>
   query(
@@ -52,7 +67,9 @@ router.get("/", requireAdmin, async (_req: Request, res: Response) => {
 
 // POST /api/users  { full_name, email, whatsapp, role }
 router.post("/", requireAdmin, async (req: Request, res: Response) => {
-  const { full_name, email, whatsapp, role } = req.body;
+  const { full_name, email, whatsapp, role, church_role } = req.body;
+  const invalid = checkProfile(req.body);
+  if (invalid) return res.status(400).json({ error: invalid });
   if (!full_name?.trim() || !email?.trim() || !whatsapp?.trim() || !role) {
     return res.status(400).json({ error: "Nome, e-mail, WhatsApp e perfil são obrigatórios" });
   }
@@ -66,11 +83,13 @@ router.post("/", requireAdmin, async (req: Request, res: Response) => {
     const number = await checkWhatsapp(whatsapp);
 
     // Senha aleatória provisória; a temporária de verdade é definida em grantAccess
-    const user = await queryOne<any>(
-      `INSERT INTO users (email, password_hash, role, full_name, whatsapp)
-       VALUES ($1, $2, $3, $4, $5) RETURNING ${FIELDS}`,
-      [email.trim().toLowerCase(), await bcrypt.hash(crypto.randomBytes(16).toString("hex"), 12), role, full_name.trim(), number]
+    const created = await queryOne<{ id: string }>(
+      `INSERT INTO users (email, password_hash, role, full_name, whatsapp, church_role)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [email.trim().toLowerCase(), await bcrypt.hash(crypto.randomBytes(16).toString("hex"), 12), role, full_name.trim(), number, church_role || null]
     );
+    await setUserMinistries(created!.id, cleanIds(req.body.ministry_ids));
+    const user = await getUser(created!.id);
 
     const access = await grantAccess(user);
     await audit(req.auth!.userId, "create_user", user.id, { email: user.email, role, whatsapp_sent: access.whatsapp_sent });
@@ -86,6 +105,8 @@ router.post("/", requireAdmin, async (req: Request, res: Response) => {
 router.patch("/:id", requireAdmin, async (req: Request, res: Response) => {
   const { full_name, whatsapp, role } = req.body;
   if (role && !TEAM_ROLES.includes(role)) return res.status(400).json({ error: "Perfil inválido" });
+  const invalid = checkProfile(req.body);
+  if (invalid) return res.status(400).json({ error: invalid });
 
   try {
     const user = await queryOne<any>("SELECT id, role FROM users WHERE id = $1 AND role = ANY($2)", [req.params.id, TEAM_ROLES]);
@@ -98,17 +119,21 @@ router.patch("/:id", requireAdmin, async (req: Request, res: Response) => {
     }
 
     const number = whatsapp ? await checkWhatsapp(whatsapp) : null;
-    const updated = await queryOne(
+    await query(
       `UPDATE users SET
          full_name = COALESCE($1, full_name),
          whatsapp = COALESCE($2, whatsapp),
          role = COALESCE($3, role),
+         church_role = CASE WHEN $5 THEN NULLIF($6, '') ELSE church_role END,
          updated_at = NOW()
-       WHERE id = $4 RETURNING ${FIELDS}`,
-      [full_name?.trim() || null, number, role || null, req.params.id]
+       WHERE id = $4`,
+      [full_name?.trim() || null, number, role || null, req.params.id, "church_role" in req.body, req.body.church_role ?? ""]
     );
-    await audit(req.auth!.userId, "update_user", req.params.id, { full_name, whatsapp: number, role });
-    return res.json(updated);
+    if (req.body.ministry_ids !== undefined) await setUserMinistries(req.params.id, cleanIds(req.body.ministry_ids));
+    await audit(req.auth!.userId, "update_user", req.params.id, {
+      full_name, whatsapp: number, role, church_role: req.body.church_role, ministry_ids: req.body.ministry_ids,
+    });
+    return res.json(await getUser(req.params.id));
   } catch (error: any) {
     if (error.status) return res.status(error.status).json({ error: error.message });
     return res.status(500).json({ error: "Erro interno do servidor" });

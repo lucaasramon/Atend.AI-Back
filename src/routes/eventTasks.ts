@@ -5,11 +5,19 @@
 import { Router, Request, Response } from "express";
 import { query, queryOne } from "../db";
 import { requireAdmin, requireRole } from "../middleware/auth";
+import { canManageEvent } from "../services/userAreas";
 
 const router = Router();
 const requireEditor = requireRole("admin", "agenda");
 const requireReader = requireRole("admin", "agenda", "viewer");
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const NOT_YOUR_AREA = "Você só pode alterar o checklist de eventos das suas áreas.";
+
+/** O usuário pode alterar o checklist deste evento (ou do evento desta tarefa)? */
+async function allowed(req: Request, eventId?: string, taskId?: string): Promise<boolean> {
+  const id = eventId || (await queryOne<{ event_id: string }>("SELECT event_id FROM event_tasks WHERE id = $1", [taskId]))?.event_id;
+  return !!id && canManageEvent(req.auth!.userId, req.auth!.role, id);
+}
 
 const TASK_SELECT = `
   SELECT t.id, t.event_id, t.title, t.assignee_id, t.assignee_name, to_char(t.due_date, 'YYYY-MM-DD') AS due_date,
@@ -105,6 +113,7 @@ router.get("/:eventId/tasks", requireReader, async (req: Request, res: Response)
 
 // POST /api/events/:eventId/tasks  { title, assignee_id?, assignee_name?, due_date? }
 router.post("/:eventId/tasks", requireEditor, async (req: Request, res: Response) => {
+  if (!(await allowed(req, req.params.eventId))) return res.status(403).json({ error: NOT_YOUR_AREA });
   const { title, assignee_id, assignee_name, due_date } = req.body;
   if (!String(title || "").trim()) return res.status(400).json({ error: "Informe a tarefa" });
   if (due_date && !DATE_RE.test(due_date)) return res.status(400).json({ error: "Prazo inválido" });
@@ -123,6 +132,7 @@ router.post("/:eventId/tasks", requireEditor, async (req: Request, res: Response
 
 // POST /api/events/:eventId/tasks/from-template  { template_id }
 router.post("/:eventId/tasks/from-template", requireEditor, async (req: Request, res: Response) => {
+  if (!(await allowed(req, req.params.eventId))) return res.status(403).json({ error: NOT_YOUR_AREA });
   try {
     const ev = await queryOne<{ starts_at: Date }>("SELECT starts_at FROM events WHERE id = $1", [req.params.eventId]);
     const tpl = await queryOne<{ items: { title: string; days_before?: number }[] }>(
@@ -148,6 +158,7 @@ router.post("/:eventId/tasks/from-template", requireEditor, async (req: Request,
 
 // PATCH /api/events/tasks/:taskId  { title?, assignee_id?, assignee_name?, due_date?, done? }
 router.patch("/tasks/:taskId", requireEditor, async (req: Request, res: Response) => {
+  if (!(await allowed(req, undefined, req.params.taskId))) return res.status(403).json({ error: NOT_YOUR_AREA });
   const b = req.body;
   if (b.due_date && !DATE_RE.test(b.due_date)) return res.status(400).json({ error: "Prazo inválido" });
   try {
@@ -181,6 +192,7 @@ router.patch("/tasks/:taskId", requireEditor, async (req: Request, res: Response
 
 // DELETE /api/events/tasks/:taskId
 router.delete("/tasks/:taskId", requireEditor, async (req: Request, res: Response) => {
+  if (!(await allowed(req, undefined, req.params.taskId))) return res.status(403).json({ error: NOT_YOUR_AREA });
   try {
     await query("DELETE FROM event_tasks WHERE id = $1", [req.params.taskId]);
     return res.json({ success: true });
