@@ -68,8 +68,11 @@ function nextRunAt(now: Date): Date {
   return today > now ? today : new Date(today.getTime() + DAY_MS);
 }
 
+// Começa num momento aleatório dentro desta janela (ex.: entre 08:00 e 08:10), para não ser sempre o mesmo segundo
+const JITTER_MS = (parseFloat(process.env.REMINDERS_JITTER_MIN || "10") || 0) * 60_000;
+
 function scheduleNext() {
-  const next = nextRunAt(new Date());
+  const next = new Date(nextRunAt(new Date()).getTime() + Math.random() * JITTER_MS);
   setTimeout(async () => {
     await tick();
     scheduleNext();

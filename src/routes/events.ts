@@ -656,12 +656,12 @@ router.get("/:id/preview", requireReader, async (req: Request, res: Response) =>
 });
 
 // POST /api/events/reminders/run  (admin — força uma rodada de lembretes agora)
+// Responde na hora: com as pausas entre mensagens a rodada pode levar alguns minutos
 router.post("/reminders/run", requireAdmin, async (_req: Request, res: Response) => {
-  try {
-    return res.json(await runReminders());
-  } catch (error: any) {
-    return res.status(500).json({ error: error.message || "Erro ao executar lembretes" });
-  }
+  runReminders()
+    .then((r) => console.log("[agendador] lembretes (rodar agora):", JSON.stringify(r)))
+    .catch((err) => console.error("[agendador] falha (rodar agora):", err));
+  return res.json({ started: true });
 });
 
 export default router;

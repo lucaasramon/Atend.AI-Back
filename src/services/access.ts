@@ -6,6 +6,7 @@ import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import { query } from "../db";
 import { getReminderSettings } from "./reminders";
+import { sendText } from "./evolution";
 
 const BASE_URL = (process.env.EVOLUTION_API_URL || "").replace(/\/$/, "");
 const API_KEY = process.env.EVOLUTION_API_KEY || "";
@@ -98,13 +99,6 @@ export async function sendAccessMessage(
     `O link vale por ${SETUP_TOKEN_DAYS} dias.`,
   ].join("\n");
 
-  const res = await fetch(`${BASE_URL}/message/sendText/${instance}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", apikey: API_KEY },
-    body: JSON.stringify({ number: user.whatsapp, text }),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => res.statusText);
-    throw new Error(`Falha ao enviar WhatsApp (${res.status}): ${body.slice(0, 200)}`);
-  }
+  // Pela fila central (pausa, "digitando…" e limite de conversas novas)
+  await sendText(instance, user.whatsapp, text);
 }

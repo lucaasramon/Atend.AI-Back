@@ -3,6 +3,8 @@
  * Docs: https://doc.evolution-api.com
  */
 
+import { query, queryOne } from "../db";
+
 const BASE_URL = (process.env.EVOLUTION_API_URL || "").replace(/\/$/, "");
 const API_KEY  = process.env.EVOLUTION_API_KEY || "";
 
@@ -69,9 +71,62 @@ export async function listInstances(): Promise<unknown[]> {
   return evo("GET", "/instance/fetchInstances");
 }
 
-/** Envia mensagem de texto para um número ou grupo (ex: 1203630xxx@g.us) */
-export async function sendText(instanceName: string, number: string, text: string): Promise<unknown> {
-  return evo("POST", `/message/sendText/${instanceName}`, { number, text });
+// ---------- Envio com comportamento mais humano ----------
+// Toda mensagem passa por uma fila por instância: pausa aleatória entre envios,
+// "digitando…" antes de cada mensagem e limite diário de conversas novas no privado.
+
+const MIN_GAP_MS = (parseFloat(process.env.SEND_DELAY_MIN_S || "5") || 5) * 1000;
+const MAX_GAP_MS = Math.max(MIN_GAP_MS, (parseFloat(process.env.SEND_DELAY_MAX_S || "20") || 20) * 1000);
+
+const queues = new Map<string, Promise<unknown>>();
+const lastSentAt = new Map<string, number>();
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const randomGap = () => MIN_GAP_MS + Math.random() * (MAX_GAP_MS - MIN_GAP_MS);
+
+/** "Digitando…" proporcional ao texto: ~1,5s a 6s */
+const typingMs = (text: string) => Math.round(Math.min(6000, Math.max(1500, 1000 + text.length * 25)) * (0.8 + Math.random() * 0.4));
+
+const isPrivate = (number: string) => !number.endsWith("@g.us");
+const digits = (number: string) => number.split("@")[0].replace(/\D/g, "");
+
+/** Bloqueia conversa NOVA no privado se o limite do dia já foi atingido */
+async function checkNewContactLimit(number: string) {
+  const known = await queryOne("SELECT 1 FROM whatsapp_dm_log WHERE number = $1 LIMIT 1", [digits(number)]);
+  if (known) return;
+  const limitRow = await queryOne<{ value: string }>("SELECT value FROM system_settings WHERE key = 'dm_new_daily_limit'");
+  const limit = parseInt(limitRow?.value || "30") || 30;
+  const today = await queryOne<{ count: string }>(
+    `SELECT COUNT(*) AS count FROM (
+       SELECT number FROM whatsapp_dm_log GROUP BY number
+       HAVING MIN(sent_at) >= date_trunc('day', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo'
+     ) t`
+  );
+  if (parseInt(today!.count) >= limit) {
+    throw new Error(`Limite diário de ${limit} conversas novas no privado atingido; tenta de novo amanhã`);
+  }
+}
+
+/** Envia mensagem de texto para um número ou grupo (ex: 1203630xxx@g.us), pela fila */
+export function sendText(instanceName: string, number: string, text: string): Promise<unknown> {
+  const previous = queues.get(instanceName) || Promise.resolve();
+  const job = previous
+    .catch(() => {})
+    .then(async () => {
+      const wait = (lastSentAt.get(instanceName) || 0) + randomGap() - Date.now();
+      if (wait > 0) await sleep(wait);
+      const dm = isPrivate(number);
+      if (dm) await checkNewContactLimit(number);
+      try {
+        // "delay" faz a Evolution mostrar "digitando…" antes de enviar
+        const result = await evo("POST", `/message/sendText/${instanceName}`, { number, text, delay: typingMs(text) });
+        if (dm) await query("INSERT INTO whatsapp_dm_log (number) VALUES ($1)", [digits(number)]).catch(() => {});
+        return result;
+      } finally {
+        lastSentAt.set(instanceName, Date.now());
+      }
+    });
+  queues.set(instanceName, job);
+  return job;
 }
 
 /** Lista os grupos dos quais a instância participa */

@@ -1,6 +1,6 @@
 {
   "name": "whisper-orchestrate-backend",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "type": "commonjs",
   "scripts": {
     "dev": "nodemon --exec ts-node src/index.ts",
