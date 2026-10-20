@@ -12,7 +12,6 @@ import { getReminderSettings, localDate } from "./reminders";
 const LAST_HOUR = 20;
 
 export const VERSES = [
-  "“O Senhor te abençoe e te guarde; o Senhor faça resplandecer o rosto sobre ti e tenha misericórdia de ti.” (Números 6:24-25)",
   "“Porque sou eu que conheço os planos que tenho para vocês, diz o Senhor, planos de fazê-los prosperar e não de causar dano, planos de dar a vocês esperança e um futuro.” (Jeremias 29:11)",
   "“Ensina-nos a contar os nossos dias, para que alcancemos coração sábio.” (Salmos 90:12)",
   "“Deleite-se no Senhor, e ele atenderá aos desejos do seu coração.” (Salmos 37:4)",
@@ -41,6 +40,7 @@ export interface BirthdaySettings {
   gapMin: number;
   gapMax: number;
   template: string; // "" = padrão
+  verse: string; // "" = sorteia um de VERSES; senão usa sempre este
 }
 
 export async function getBirthdaySettings(): Promise<BirthdaySettings> {
@@ -53,12 +53,13 @@ export async function getBirthdaySettings(): Promise<BirthdaySettings> {
     gapMin,
     gapMax: Math.max(gapMin, parseFloat(s.birthday_gap_max ?? "10") || 0),
     template: s.birthday_template || "",
+    verse: s.birthday_verse || "",
   };
 }
 
 const randomVerse = () => VERSES[Math.floor(Math.random() * VERSES.length)];
 
-export function renderBirthday(cfg: Pick<BirthdaySettings, "church" | "template">, fullName: string, verse = randomVerse()): string {
+export function renderBirthday(cfg: Pick<BirthdaySettings, "church" | "template" | "verse">, fullName: string, verse = cfg.verse || randomVerse()): string {
   const first = fullName.trim().split(/\s+/)[0] || fullName;
   return (cfg.template || DEFAULT_TEMPLATE)
     .replace(/\{nome\}/g, first)

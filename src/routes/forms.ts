@@ -275,6 +275,7 @@ peopleRouter.get("/birthdays", requireAdmin, async (_req: Request, res: Response
       gap_min: cfg.gapMin,
       gap_max: cfg.gapMax,
       template: cfg.template || DEFAULT_TEMPLATE,
+      verse: cfg.verse,
       default_template: DEFAULT_TEMPLATE,
       verses: VERSES,
       running: birthdaysRunning(),
@@ -304,6 +305,7 @@ peopleRouter.put("/birthdays", requireAdmin, async (req: Request, res: Response)
       birthday_gap_min: String(gapMin),
       birthday_gap_max: String(gapMax),
       birthday_template: template === DEFAULT_TEMPLATE ? "" : template,
+      birthday_verse: str(b.verse, 600),
     };
     for (const [key, value] of Object.entries(values)) {
       await query(
@@ -326,7 +328,11 @@ peopleRouter.post("/birthdays/test", requireAdmin, async (req: Request, res: Res
     if (!me?.whatsapp) return res.status(400).json({ error: "Seu usuário não tem WhatsApp cadastrado (Usuários → editar)." });
     const cfg = await getBirthdaySettings();
     const text = renderBirthday(
-      { church: str(req.body?.church, 120) || cfg.church, template: str(req.body?.template, 2000) || cfg.template },
+      {
+        church: str(req.body?.church, 120) || cfg.church,
+        template: str(req.body?.template, 2000) || cfg.template,
+        verse: typeof req.body?.verse === "string" ? str(req.body.verse, 600) : cfg.verse,
+      },
       me.full_name || "Irmão(ã)"
     );
     if (!(await sendDirect(me.whatsapp, text))) return res.status(502).json({ error: "Não foi possível enviar agora. Tente de novo." });
