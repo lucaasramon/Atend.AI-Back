@@ -130,6 +130,16 @@ publicFormsRouter.post("/signup", limitPost, async (req: Request, res: Response)
         !!b.wants_contact, JSON.stringify(valid.map((v) => v.id)), str(b.notes, 1000) || null,
       ]
     );
+    // Pedido de oração do cadastro vai para a lista do pastor (tela Início)
+    const notes = str(b.notes, 1000);
+    if (notes) {
+      await query(
+        `INSERT INTO pastoral_requests (kind, source, person_name, whatsapp, details)
+         SELECT 'prayer', 'cadastro', $1, $2, $3
+          WHERE NOT EXISTS (SELECT 1 FROM pastoral_requests WHERE source = 'cadastro' AND whatsapp = $2 AND details = $3)`,
+        [name, whatsapp, notes]
+      );
+    }
     return res.status(201).json({ ok: true, updated: !!row?.updated });
   } catch (error) {
     console.error("Signup error:", error);
