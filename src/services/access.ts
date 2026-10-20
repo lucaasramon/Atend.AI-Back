@@ -77,16 +77,15 @@ const ROLE_LABEL: Record<string, string> = {
   viewer: "Visualizador",
 };
 
-/** Envia pelo robô da agenda a mensagem com link, login e senha temporária */
-export async function sendAccessMessage(
-  user: { full_name: string | null; email: string; whatsapp: string; role: string },
-  password: string,
-  token: string
-): Promise<void> {
-  const { instance } = await getReminderSettings();
-  const link = `${appUrl()}/primeiro-acesso?token=${token}`;
+type AccessUser = { full_name: string | null; email: string; whatsapp: string; role: string };
+
+export const accessLink = (token: string) => `${appUrl()}/primeiro-acesso?token=${token}`;
+
+/** Texto com link, login e senha temporária (enviado pelo robô ou copiado pelo admin) */
+export function accessMessageText(user: AccessUser, password: string, token: string): string {
+  const link = accessLink(token);
   const firstName = (user.full_name || "").split(" ")[0];
-  const text = [
+  return [
     `Olá${firstName ? `, ${firstName}` : ""}! 👋`,
     `Você recebeu acesso ao *D.Sync*, o sistema da agenda da igreja (perfil: ${ROLE_LABEL[user.role] || user.role}).`,
     "",
@@ -98,7 +97,11 @@ export async function sendAccessMessage(
     "",
     `O link vale por ${SETUP_TOKEN_DAYS} dias.`,
   ].join("\n");
+}
 
+/** Envia pelo robô da agenda a mensagem com link, login e senha temporária */
+export async function sendAccessMessage(user: AccessUser, password: string, token: string): Promise<void> {
+  const { instance } = await getReminderSettings();
   // Pela fila central (pausa, "digitando…" e limite de conversas novas)
-  await sendText(instance, user.whatsapp, text);
+  await sendText(instance, user.whatsapp, accessMessageText(user, password, token));
 }

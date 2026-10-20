@@ -3,7 +3,10 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { query, queryOne } from "../db";
 import { requireAdmin } from "../middleware/auth";
-import { issueTemporaryAccess, resolveWhatsapp, sendAccessMessage } from "../services/access";
+import { accessLink, accessMessageText, issueTemporaryAccess, resolveWhatsapp, sendAccessMessage } from "../services/access";
+
+/** Como entregar o acesso: link para o admin enviar (padrão) ou mensagem do robô */
+const deliveryOf = (v: unknown): "link" | "whatsapp" => (v === "whatsapp" ? "whatsapp" : "link");
 import { CHURCH_ROLES, setUserMinistries } from "../services/userAreas";
 import { syncMemberFromUser } from "../services/members";
 
@@ -40,9 +43,22 @@ async function checkWhatsapp(raw: string): Promise<string> {
   return r.jid.split("@")[0];
 }
 
-/** Gera senha temporária + link e envia pelo WhatsApp. Não falha o cadastro se o envio falhar. */
-async function grantAccess(user: any) {
+/**
+ * Gera senha temporária + link de primeiro acesso.
+ * delivery "link": não manda nada; devolve o texto pronto para o admin enviar do próprio WhatsApp.
+ * delivery "whatsapp": o robô envia. Não falha o cadastro se o envio falhar.
+ */
+async function grantAccess(user: any, delivery: "link" | "whatsapp") {
   const { password, token } = await issueTemporaryAccess(user.id);
+  if (delivery === "link") {
+    return {
+      whatsapp_sent: false as const,
+      delivery,
+      access_link: accessLink(token),
+      access_message: accessMessageText(user, password, token),
+      temp_password: password,
+    };
+  }
   try {
     await sendAccessMessage(user, password, token);
     return { whatsapp_sent: true as const };
@@ -93,8 +109,9 @@ router.post("/", requireAdmin, async (req: Request, res: Response) => {
     await syncMemberFromUser(created!.id); // já vira membro das escalas
     const user = await getUser(created!.id);
 
-    const access = await grantAccess(user);
-    await audit(req.auth!.userId, "create_user", user.id, { email: user.email, role, whatsapp_sent: access.whatsapp_sent });
+    const delivery = deliveryOf(req.body.delivery);
+    const access = await grantAccess(user, delivery);
+    await audit(req.auth!.userId, "create_user", user.id, { email: user.email, role, delivery, whatsapp_sent: access.whatsapp_sent });
     return res.status(201).json({ ...user, must_change_password: true, ...access });
   } catch (error: any) {
     if (error.status) return res.status(error.status).json({ error: error.message });
@@ -143,7 +160,7 @@ router.patch("/:id", requireAdmin, async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/users/:id/resend  (nova senha temporária + novo link pelo WhatsApp)
+// POST /api/users/:id/resend  { delivery: "link" | "whatsapp" }  (nova senha temporária + novo link)
 router.post("/:id/resend", requireAdmin, async (req: Request, res: Response) => {
   try {
     const user = await queryOne<any>(`SELECT ${FIELDS} FROM users WHERE id = $1 AND role = ANY($2)`, [req.params.id, TEAM_ROLES]);
@@ -151,8 +168,9 @@ router.post("/:id/resend", requireAdmin, async (req: Request, res: Response) => 
     if (!user.whatsapp) return res.status(400).json({ error: "Usuário sem WhatsApp cadastrado" });
     if (user.id === req.auth!.userId) return res.status(400).json({ error: "Use a troca de senha para a sua própria conta" });
 
-    const access = await grantAccess(user);
-    await audit(req.auth!.userId, "resend_access", user.id, { whatsapp_sent: access.whatsapp_sent });
+    const delivery = deliveryOf(req.body?.delivery);
+    const access = await grantAccess(user, delivery);
+    await audit(req.auth!.userId, "resend_access", user.id, { delivery, whatsapp_sent: access.whatsapp_sent });
     return res.json(access);
   } catch (error) {
     return res.status(500).json({ error: "Erro interno do servidor" });
