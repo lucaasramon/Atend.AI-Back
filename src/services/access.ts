@@ -88,7 +88,7 @@ export async function sendAccessMessage(
   const firstName = (user.full_name || "").split(" ")[0];
   const text = [
     `Olá${firstName ? `, ${firstName}` : ""}! 👋`,
-    `Você recebeu acesso ao sistema da agenda (perfil: ${ROLE_LABEL[user.role] || user.role}).`,
+    `Você recebeu acesso ao *D.Sync*, o sistema da agenda da igreja (perfil: ${ROLE_LABEL[user.role] || user.role}).`,
     "",
     `🔗 Defina sua senha por este link:`,
     link,
