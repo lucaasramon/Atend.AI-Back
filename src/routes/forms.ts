@@ -13,6 +13,10 @@ import { rateLimit } from "../middleware/rateLimit";
 import { normalizePhone } from "../services/access";
 import { canManageEvent } from "../services/userAreas";
 import { locationLabel } from "../services/eventData";
+import { sendDirect } from "../services/notify";
+import {
+  DEFAULT_TEMPLATE, VERSES, birthdaysRunning, birthdaysToday, getBirthdaySettings, renderBirthday,
+} from "../services/birthdays";
 
 const requireEditor = requireRole("admin", "agenda");
 
@@ -255,6 +259,78 @@ peopleRouter.get("/new-count", requireAdmin, async (_req: Request, res: Response
   try {
     const r = await queryOne<{ count: number }>("SELECT COUNT(*)::int AS count FROM people WHERE status = 'new'");
     return res.json({ count: r?.count || 0 });
+  } catch (error) {
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
+// GET /api/people/birthdays  (configuração dos parabéns + aniversariantes de hoje)
+peopleRouter.get("/birthdays", requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const cfg = await getBirthdaySettings();
+    const today = await birthdaysToday();
+    return res.json({
+      enabled: cfg.enabled,
+      church: cfg.church,
+      gap_min: cfg.gapMin,
+      gap_max: cfg.gapMax,
+      template: cfg.template || DEFAULT_TEMPLATE,
+      default_template: DEFAULT_TEMPLATE,
+      verses: VERSES,
+      running: birthdaysRunning(),
+      today: today.map((p) => ({ id: p.id, name: p.name, birth_date: p.birth_date, sent_at: p.sent_at })),
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
+// PUT /api/people/birthdays  { enabled, church, gap_min, gap_max, template }
+peopleRouter.put("/birthdays", requireAdmin, async (req: Request, res: Response) => {
+  const b = req.body || {};
+  const gapMin = Number(b.gap_min);
+  const gapMax = Number(b.gap_max);
+  if (!Number.isFinite(gapMin) || !Number.isFinite(gapMax) || gapMin < 1 || gapMax < gapMin || gapMax > 240) {
+    return res.status(400).json({ error: "Intervalo inválido: use de 1 a 240 minutos, com o mínimo menor ou igual ao máximo" });
+  }
+  const church = str(b.church, 120);
+  if (!church) return res.status(400).json({ error: "Informe o nome da igreja" });
+  const template = str(b.template, 2000);
+  if (!template.includes("{nome}")) return res.status(400).json({ error: "A mensagem precisa ter {nome}" });
+  try {
+    const values: Record<string, string> = {
+      birthday_enabled: b.enabled === false ? "false" : "true",
+      birthday_church: church,
+      birthday_gap_min: String(gapMin),
+      birthday_gap_max: String(gapMax),
+      birthday_template: template === DEFAULT_TEMPLATE ? "" : template,
+    };
+    for (const [key, value] of Object.entries(values)) {
+      await query(
+        `INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        [key, value]
+      );
+    }
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("Save birthday settings error:", error);
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
+// POST /api/people/birthdays/test  { church, template }  (manda um exemplo para o WhatsApp de quem pediu)
+peopleRouter.post("/birthdays/test", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const me = await queryOne<{ full_name: string | null; whatsapp: string | null }>("SELECT full_name, whatsapp FROM users WHERE id = $1", [req.auth!.userId]);
+    if (!me?.whatsapp) return res.status(400).json({ error: "Seu usuário não tem WhatsApp cadastrado (Usuários → editar)." });
+    const cfg = await getBirthdaySettings();
+    const text = renderBirthday(
+      { church: str(req.body?.church, 120) || cfg.church, template: str(req.body?.template, 2000) || cfg.template },
+      me.full_name || "Irmão(ã)"
+    );
+    if (!(await sendDirect(me.whatsapp, text))) return res.status(502).json({ error: "Não foi possível enviar agora. Tente de novo." });
+    return res.json({ success: true });
   } catch (error) {
     return res.status(500).json({ error: "Erro interno do servidor" });
   }

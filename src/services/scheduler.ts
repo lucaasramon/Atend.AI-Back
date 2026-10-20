@@ -10,6 +10,7 @@ import { runPops } from "./pops";
 import { runMediaReminders } from "./media";
 import { runEscalations } from "./acks";
 import { runRosterGroups, runRosterNotifications } from "./roster";
+import { runBirthdays } from "./birthdays";
 
 const DAY_MS = 24 * 60 * 60_000;
 const RETRY_MS = 5 * 60_000;
@@ -26,6 +27,7 @@ const DAILY_JOBS: Job[] = [
   { name: "mídia", run: runMediaReminders },
   { name: "escalas", run: runRosterNotifications },
   { name: "escalas nos grupos", run: runRosterGroups },
+  { name: "aniversários", run: runBirthdays }, // segue em segundo plano, com intervalo entre envios
 ];
 
 const HOUR_MS = 60 * 60_000;
@@ -81,12 +83,18 @@ function scheduleNext() {
   console.log(`[agendador] próxima rodada: ${next.toLocaleString("pt-BR", { timeZone: TZ })}`);
 }
 
-/** Escalonamento das confirmações: confere a cada hora os prazos vencidos */
+/** A cada hora: escalonamento das confirmações e aniversariantes que ficaram sem parabéns */
 function startHourly() {
   setInterval(() => {
     runEscalations()
       .then((r) => r.escalated && console.log("[agendador] confirmações:", JSON.stringify(r)))
       .catch((err) => console.error("[agendador] falha no escalonamento:", err));
+    // Aniversariantes cadastrados depois da rodada (ou envio que falhou): confere de novo até as 20h
+    if (isPastTodayRun()) {
+      runBirthdays()
+        .then((r: any) => r.pending && console.log("[agendador] aniversários:", JSON.stringify(r)))
+        .catch((err) => console.error("[agendador] falha nos aniversários:", err));
+    }
   }, HOUR_MS);
 }
 
