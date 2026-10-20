@@ -10,7 +10,9 @@ import { Router, Request, Response } from "express";
 import { query, queryOne } from "../db";
 import { requireRole } from "../middleware/auth";
 import { resolveWhatsapp } from "../services/access";
-import { placeholderHash, rosterInfo, sendRosterEntry, updateRosterChecklist } from "../services/roster";
+import { placeholderHash, rosterInfo, runRosterGroups, sendRosterEntry, updateRosterChecklist } from "../services/roster";
+import { getAllowedGroups } from "../services/reminders";
+import { isPastTodayRun } from "../services/scheduler";
 import { userMinistryIds } from "../services/userAreas";
 
 const requireEditor = requireRole("admin", "agenda");
@@ -215,8 +217,32 @@ eventRosterRouter.get("/:eventId/roster", requireReader, async (req: Request, re
   }
 });
 
-// PUT /api/events/:eventId/roster/ministry/:ministryId  { entries: [{ member_id, task?, area_id? }] }
+// GET /api/events/:eventId/roster/group/:ministryId  (grupo que recebe a escala da área; suggested = último usado pela área)
+eventRosterRouter.get("/:eventId/roster/group/:ministryId", requireReader, async (req: Request, res: Response) => {
+  const { eventId, ministryId } = req.params;
+  try {
+    const current = await queryOne<{ group_jid: string; sent_at: Date | null }>(
+      "SELECT group_jid, sent_at FROM roster_groups WHERE event_id = $1 AND ministry_id = $2",
+      [eventId, ministryId]
+    );
+    const last = await queryOne<{ group_jid: string }>(
+      `SELECT group_jid FROM roster_groups WHERE ministry_id = $1 AND event_id <> $2 ORDER BY updated_at DESC LIMIT 1`,
+      [ministryId, eventId]
+    );
+    const ministry = await queryOne<{ group_jid: string | null }>("SELECT group_jid FROM ministries WHERE id = $1", [ministryId]);
+    return res.json({
+      group_jid: current?.group_jid || null,
+      sent_at: current?.sent_at || null,
+      suggested: last?.group_jid || ministry?.group_jid || null,
+    });
+  } catch (error) {
+    return res.status(400).json({ error: "Evento ou área inválidos" });
+  }
+});
+
+// PUT /api/events/:eventId/roster/ministry/:ministryId  { entries: [{ member_id, task?, area_id? }], group_jid? }
 // Salva a escala completa da área no evento: inclui os novos, atualiza a função e remove quem saiu.
+// group_jid: grupo que recebe a escala 1 dia antes ("" ou null = não enviar em grupo; ausente = não mexe).
 eventRosterRouter.put("/:eventId/roster/ministry/:ministryId", requireEditor, async (req: Request, res: Response) => {
   const { eventId, ministryId } = req.params;
   const list: any[] = Array.isArray(req.body.entries) ? req.body.entries : [];
@@ -224,6 +250,10 @@ eventRosterRouter.put("/:eventId/roster/ministry/:ministryId", requireEditor, as
   try {
     if (!(await canEditMinistry(req, ministryId))) {
       return res.status(403).json({ error: "Você só pode montar escalas das suas áreas." });
+    }
+    const groupJid = req.body.group_jid;
+    if (typeof groupJid === "string" && groupJid && !(await getAllowedGroups()).includes(groupJid)) {
+      return res.status(400).json({ error: "Esse grupo não está liberado para o robô" });
     }
     const keep = list.map((e) => e.member_id);
     await query(
@@ -239,6 +269,25 @@ eventRosterRouter.put("/:eventId/roster/ministry/:ministryId", requireEditor, as
          ON CONFLICT (event_id, ministry_id, member_id) DO UPDATE SET task = EXCLUDED.task, area_id = EXCLUDED.area_id`,
         [eventId, ministryId, e.member_id, task, areaId, placeholderHash()]
       );
+    }
+    if (groupJid !== undefined) {
+      if (groupJid && list.length) {
+        // Trocou de grupo: envia de novo para o grupo novo
+        await query(
+          `INSERT INTO roster_groups (event_id, ministry_id, group_jid) VALUES ($1, $2, $3)
+           ON CONFLICT (event_id, ministry_id) DO UPDATE SET group_jid = EXCLUDED.group_jid, updated_at = NOW(),
+             sent_at = CASE WHEN roster_groups.group_jid = EXCLUDED.group_jid THEN roster_groups.sent_at END`,
+          [eventId, ministryId, groupJid]
+        );
+      } else {
+        await query("DELETE FROM roster_groups WHERE event_id = $1 AND ministry_id = $2", [eventId, ministryId]);
+      }
+      // Escala montada em cima da hora (rodada de hoje já passou): envia já, sem esperar amanhã
+      if (isPastTodayRun()) {
+        runRosterGroups()
+          .then((r) => r.pending && console.log("[agendador] escalas nos grupos (escala salva):", JSON.stringify(r)))
+          .catch((err) => console.error("[agendador] falha nas escalas nos grupos:", err));
+      }
     }
     return res.json(await query(`${ROSTER_SELECT} WHERE r.event_id = $1 AND r.ministry_id = $2 ${ROSTER_ORDER}`, [eventId, ministryId]));
   } catch (error) {
