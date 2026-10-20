@@ -85,7 +85,10 @@ const fullEvent = (id: string) =>
                         FROM event_reminders_sent r WHERE r.event_id = e.id), '[]') AS reminders,
             (SELECT COUNT(*)::int FROM event_tasks t WHERE t.event_id = e.id) AS tasks_total,
             (SELECT COUNT(*)::int FROM event_tasks t WHERE t.event_id = e.id AND t.done) AS tasks_done,
-            (SELECT COUNT(*)::int FROM roster_entries re WHERE re.event_id = e.id) AS roster_count
+            (SELECT COUNT(*)::int FROM roster_entries re WHERE re.event_id = e.id) AS roster_count,
+            (SELECT f.id FROM event_forms f WHERE f.event_id = e.id) AS form_id,
+            (SELECT COUNT(*)::int FROM event_registrations er JOIN event_forms f ON f.id = er.form_id
+              WHERE f.event_id = e.id AND er.status = 'confirmed') AS registrations_count
        FROM events e
        LEFT JOIN users c ON c.id = e.created_by
        LEFT JOIN users a ON a.id = e.approved_by
@@ -300,7 +303,10 @@ router.get("/", requireReader, async (_req: Request, res: Response) => {
                           FROM event_reminders_sent r WHERE r.event_id = e.id), '[]') AS reminders,
             (SELECT COUNT(*)::int FROM event_tasks t WHERE t.event_id = e.id) AS tasks_total,
             (SELECT COUNT(*)::int FROM event_tasks t WHERE t.event_id = e.id AND t.done) AS tasks_done,
-            (SELECT COUNT(*)::int FROM roster_entries re WHERE re.event_id = e.id) AS roster_count
+            (SELECT COUNT(*)::int FROM roster_entries re WHERE re.event_id = e.id) AS roster_count,
+            (SELECT f.id FROM event_forms f WHERE f.event_id = e.id) AS form_id,
+            (SELECT COUNT(*)::int FROM event_registrations er JOIN event_forms f ON f.id = er.form_id
+              WHERE f.event_id = e.id AND er.status = 'confirmed') AS registrations_count
          FROM events e
          LEFT JOIN users c ON c.id = e.created_by
          LEFT JOIN users a ON a.id = e.approved_by

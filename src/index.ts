@@ -29,6 +29,7 @@ import popRoutes from "./routes/pops";
 import mediaRoutes from "./routes/media";
 import ackRoutes from "./routes/acks";
 import { areasRouter, eventRosterRouter, membersRouter, publicRosterRouter } from "./routes/roster";
+import { eventFormsRouter, peopleRouter, publicFormsRouter } from "./routes/forms";
 import { startScheduler } from "./services/scheduler";
 
 const app = express();
@@ -71,6 +72,7 @@ app.use("/api/billing", billingRoutes);
 app.use("/api/evolution", evolutionRoutes);
 app.use("/api/ai", aiRoutes);
 app.use("/api/webhook", webhookRoutes);
+app.use("/api/events", eventFormsRouter); // /forms e /:eventId/form (antes de eventRoutes)
 app.use("/api/events", eventRosterRouter);
 app.use("/api/events", eventTaskRoutes); // antes de eventRoutes (rotas /tasks, /people...)
 app.use("/api/events", eventRoutes);
@@ -80,6 +82,8 @@ app.use("/api/acks", ackRoutes);
 app.use("/api/members", membersRouter);
 app.use("/api/areas", areasRouter);
 app.use("/api/roster", publicRosterRouter);
+app.use("/api/public", publicFormsRouter); // formulários públicos (cadastro e inscrições)
+app.use("/api/people", peopleRouter);
 app.use("/api/users", userRoutes);
 app.use("/api/ministries", ministryRoutes);
 app.use("/api/locations", locationRoutes);
