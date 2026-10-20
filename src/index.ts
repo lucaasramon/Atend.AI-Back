@@ -30,6 +30,7 @@ import mediaRoutes from "./routes/media";
 import ackRoutes from "./routes/acks";
 import { areasRouter, eventRosterRouter, membersRouter, publicRosterRouter } from "./routes/roster";
 import { eventFormsRouter, peopleRouter, publicFormsRouter } from "./routes/forms";
+import sermonRoutes from "./routes/sermons";
 import { startScheduler } from "./services/scheduler";
 
 const app = express();
@@ -84,6 +85,7 @@ app.use("/api/areas", areasRouter);
 app.use("/api/roster", publicRosterRouter);
 app.use("/api/public", publicFormsRouter); // formulários públicos (cadastro e inscrições)
 app.use("/api/people", peopleRouter);
+app.use("/api/sermons", sermonRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/ministries", ministryRoutes);
 app.use("/api/locations", locationRoutes);
