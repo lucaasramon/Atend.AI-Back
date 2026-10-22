@@ -24,6 +24,8 @@ interface Block {
   notes: string;
   minutes: number;
   verses: { ref: string; text: string }[];
+  /** Frases que o pastor quer na projeção (telão) */
+  phrases: string[];
 }
 
 /** Limpa os blocos vindos da tela */
@@ -40,6 +42,10 @@ function cleanBlocks(raw: unknown): Block[] {
       .slice(0, 30)
       .map((v: any) => ({ ref: str(v?.ref, 60).trim(), text: str(v?.text, 3000) }))
       .filter((v: { ref: string; text: string }) => v.ref || v.text.trim()),
+    phrases: (Array.isArray(b?.phrases) ? b.phrases : [])
+      .slice(0, 30)
+      .map((p: unknown) => str(p, 600))
+      .filter((p: string) => p.trim()),
   }));
 }
 

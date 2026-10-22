@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS sermons (
   bible_text   TEXT,                       -- texto base (ex.: "Romanos 8")
   event_id     UUID REFERENCES events(id) ON DELETE SET NULL, -- culto em que vai pregar
   blocks       JSONB NOT NULL DEFAULT '[]',
-  -- [{id, kind, title, text, notes, minutes, verses: [{ref, text}]}]
+  -- [{id, kind, title, text, notes, minutes, verses: [{ref, text}], phrases: [texto]}]
   preached_at  TIMESTAMPTZ,                -- quando foi pregada (pelo painel do púlpito)
   duration_sec INT,
   block_times  JSONB,                      -- [{id, seconds}] tempo real de cada bloco
