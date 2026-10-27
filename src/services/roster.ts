@@ -73,6 +73,7 @@ export async function runRosterNotifications(now = new Date()) {
   const pending = await query<{ id: string }>(
     `SELECT r.id FROM roster_entries r JOIN events e ON e.id = r.event_id
       WHERE r.sent_at IS NULL AND e.status = 'approved' AND e.starts_at > NOW()
+        AND e.notify_private -- checklist no privado só se o evento pedir
         AND (e.starts_at AT TIME ZONE 'America/Sao_Paulo')::date - $1::date <= $2`,
     [localDate(now), daysBefore]
   );

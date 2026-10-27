@@ -96,6 +96,7 @@ export async function onEventsApproved(eventIds: string[]) {
        JOIN event_ministries em ON em.event_id = e.id
        JOIN ministries m ON m.id = em.ministry_id
       WHERE e.id = ANY($1) AND e.status = 'approved' AND e.starts_at > NOW()
+        AND e.notify_private -- só eventos marcados para avisar no privado
         AND NOT EXISTS (SELECT 1 FROM acknowledgements a WHERE a.event_id = e.id AND a.ministry_id = m.id)
       ORDER BY COALESCE(e.series_id, e.id), m.id, e.starts_at`,
     [eventIds]
@@ -125,7 +126,7 @@ export async function runEscalations() {
        JOIN ministries m ON m.id = a.ministry_id
        JOIN events e ON e.id = a.event_id
       WHERE a.confirmed_at IS NULL AND a.escalated = false AND a.deadline < NOW()
-        AND e.starts_at > NOW() AND e.status = 'approved'
+        AND e.starts_at > NOW() AND e.status = 'approved' AND e.notify_private
         -- ninguém da cadeia confirmou
         AND NOT EXISTS (SELECT 1 FROM acknowledgements c
                          WHERE c.event_id = a.event_id AND c.ministry_id = a.ministry_id AND c.confirmed_at IS NOT NULL)`

@@ -29,6 +29,7 @@ export async function runTaskReminders(now = new Date()) {
        JOIN users u ON u.id = t.assignee_id
       WHERE t.done = false
         AND e.status = 'approved'
+        AND e.notify_private -- lembrete no privado só se o evento pedir
         AND t.due_date - $1::date = ANY($2::int[])
         AND (t.reminded_on IS NULL OR t.reminded_on < $1::date)`,
     [today, REMIND_DAYS_BEFORE]
