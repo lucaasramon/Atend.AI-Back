@@ -2,7 +2,7 @@
  * Formulários públicos (sem login) e a gestão deles no painel:
  *   /api/public/signup            cadastro de membros e visitantes da igreja
  *   /api/public/forms/:slug       inscrição em um evento
- *   /api/people                   (admin) cadastros recebidos
+ *   /api/people                   (admin) cadastros recebidos + usuários da plataforma (services/churchPeople)
  *   /api/events/forms, /api/events/:eventId/form   formulário de inscrição de cada evento
  */
 import crypto from "crypto";
@@ -14,6 +14,7 @@ import { normalizePhone } from "../services/access";
 import { canManageEvent } from "../services/userAreas";
 import { locationLabel } from "../services/eventData";
 import { sendDirect } from "../services/notify";
+import { CHURCH_PEOPLE } from "../services/churchPeople";
 import {
   DEFAULT_TEMPLATE, VERSES, birthdaysRunning, birthdaysToday, getBirthdaySettings, renderBirthday,
 } from "../services/birthdays";
@@ -253,13 +254,16 @@ publicFormsRouter.post("/forms/:slug", limitPost, async (req: Request, res: Resp
 });
 
 // ============================================================
-// Painel: cadastros recebidos (admin)
+// Painel: cadastros recebidos + usuários da plataforma (admin)
 // ============================================================
 export const peopleRouter = Router();
 
+/** Uma pessoa da lista da igreja, no mesmo formato da listagem */
+const churchPerson = (id: string) => queryOne(`SELECT * FROM (${CHURCH_PEOPLE}) cp WHERE id = $1`, [id]);
+
 peopleRouter.get("/", requireAdmin, async (_req: Request, res: Response) => {
   try {
-    return res.json(await query("SELECT * FROM people ORDER BY created_at DESC"));
+    return res.json(await query(`SELECT * FROM (${CHURCH_PEOPLE}) cp ORDER BY created_at DESC`));
   } catch (error) {
     return res.status(500).json({ error: "Erro interno do servidor" });
   }
@@ -356,8 +360,8 @@ peopleRouter.patch("/:id", requireAdmin, async (req: Request, res: Response) => 
   const status = oneOf(req.body.status, ["new", "seen"] as const);
   if (!status) return res.status(400).json({ error: "Status inválido" });
   try {
-    const row = await queryOne("UPDATE people SET status = $1 WHERE id = $2 RETURNING *", [status, req.params.id]);
-    return row ? res.json(row) : res.status(404).json({ error: "Cadastro não encontrado" });
+    const row = await queryOne("UPDATE people SET status = $1 WHERE id = $2 RETURNING id", [status, req.params.id]);
+    return row ? res.json(await churchPerson(req.params.id)) : res.status(404).json({ error: "Cadastro não encontrado" });
   } catch (error) {
     return res.status(400).json({ error: "Cadastro inválido" });
   }
@@ -386,7 +390,8 @@ peopleRouter.post("/:id/member", requireAdmin, async (req: Request, res: Respons
         [memberId, p.interests]
       );
     }
-    return res.json(await queryOne("UPDATE people SET member_id = $1, status = 'seen' WHERE id = $2 RETURNING *", [memberId, p.id]));
+    await query("UPDATE people SET member_id = $1, status = 'seen' WHERE id = $2", [memberId, p.id]);
+    return res.json(await churchPerson(p.id));
   } catch (error) {
     console.error("Person to member error:", error);
     return res.status(400).json({ error: "Não foi possível incluir nas escalas" });

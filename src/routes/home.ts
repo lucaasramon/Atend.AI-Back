@@ -9,6 +9,7 @@ import { requireRole } from "../middleware/auth";
 import { normalizePhone } from "../services/access";
 import { localDate } from "../services/reminders";
 import { CHURCH_CITY, locateNeighborhoods, pendingNeighborhoods } from "../services/geo";
+import { CHURCH_PEOPLE } from "../services/churchPeople";
 
 const router = Router();
 const requireTeam = requireRole("admin", "agenda", "viewer");
@@ -123,7 +124,7 @@ router.get("/", requireTeam, async (req: Request, res: Response) => {
                   COUNT(*) FILTER (WHERE relation = 'member'  AND created_at >= date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')::int AS member_new,
                   COUNT(*) FILTER (WHERE relation = 'regular' AND created_at >= date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')::int AS regular_new,
                   COUNT(*) FILTER (WHERE relation = 'visitor' AND created_at >= date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')::int AS visitor_new
-             FROM people`
+             FROM (${CHURCH_PEOPLE}) p`
         ),
         query(
           `SELECT id, name, whatsapp, neighborhood, how_found, notes, created_at
@@ -164,10 +165,11 @@ router.get("/", requireTeam, async (req: Request, res: Response) => {
   }
 });
 
-// GET /api/home/stats  (admin e pastores) — gráficos dos Cadastros, sempre por vínculo para a tela filtrar
+// GET /api/home/stats  (admin e pastores) — gráficos da lista da igreja (Cadastros + usuários), sempre por vínculo para a tela filtrar
 router.get("/stats", requireTeam, async (req: Request, res: Response) => {
   if (!(await isPastor(req))) return res.status(403).json({ error: "Acesso negado" });
-  const by = (key: string, from = "people p", where = "") =>
+  const church = `(${CHURCH_PEOPLE}) p`;
+  const by = (key: string, from = church, where = "") =>
     query(`SELECT p.relation, ${key} AS key, COUNT(*)::int AS n FROM ${from} ${where} GROUP BY 1, 2`);
   try {
     const [age, gender, marital, baptized, howFound, neighborhood, interests, monthly] = await Promise.all([
@@ -175,7 +177,7 @@ router.get("/stats", requireTeam, async (req: Request, res: Response) => {
       query(
         `WITH a AS (
            SELECT relation, date_part('year', age((NOW() AT TIME ZONE 'America/Sao_Paulo')::date, birth_date))::int AS years
-             FROM people WHERE birth_date IS NOT NULL)
+             FROM ${church} WHERE birth_date IS NOT NULL)
          SELECT relation,
                 CASE WHEN years < 12 THEN 'child' WHEN years < 18 THEN 'teen' WHEN years < 30 THEN 'young'
                      WHEN years < 60 THEN 'adult' ELSE 'senior' END AS key,
@@ -184,20 +186,20 @@ router.get("/stats", requireTeam, async (req: Request, res: Response) => {
       ),
       by("p.gender"),
       by("p.marital_status"),
-      by("p.baptized", "people p", "WHERE p.relation <> 'visitor'"),
-      by("p.how_found", "people p", "WHERE p.how_found IS NOT NULL"),
+      by("p.baptized", church, "WHERE p.relation <> 'visitor'"),
+      by("p.how_found", church, "WHERE p.how_found IS NOT NULL"),
       // Bairro é texto livre: agrupa sem diferenciar maiúsculas; lat/lng vêm do mapa (services/geo)
       query(
         `SELECT p.relation, MIN(TRIM(p.neighborhood)) AS key, COUNT(*)::int AS n, g.lat, g.lng
-           FROM people p LEFT JOIN neighborhood_geo g ON g.key = LOWER(TRIM(p.neighborhood))
+           FROM ${church} LEFT JOIN neighborhood_geo g ON g.key = LOWER(TRIM(p.neighborhood))
           WHERE NULLIF(TRIM(p.neighborhood), '') IS NOT NULL
           GROUP BY p.relation, LOWER(TRIM(p.neighborhood)), g.lat, g.lng`
       ),
-      by("m.name", "people p CROSS JOIN LATERAL jsonb_array_elements_text(p.interests) i JOIN ministries m ON m.id::text = i"),
-      // Novos cadastros nos últimos 12 meses
+      by("m.name", `${church} CROSS JOIN LATERAL jsonb_array_elements_text(p.interests) i JOIN ministries m ON m.id::text = i`),
+      // Novos cadastros nos últimos 12 meses (usuário: data em que a conta foi criada)
       query(
         `SELECT relation, to_char(created_at AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM') AS key, COUNT(*)::int AS n
-           FROM people
+           FROM ${church}
           WHERE created_at >= date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo' - INTERVAL '11 months'
           GROUP BY 1, 2`
       ),
