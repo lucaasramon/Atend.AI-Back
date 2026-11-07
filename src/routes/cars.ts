@@ -1,5 +1,5 @@
 /**
- * Placa de carro no telão (quem está na escala do dia e o admin):
+ * Placa de carro no telão (quem está escalado no Estacionamento no dia e o admin):
  *   GET    /api/cars              chamadas de hoje + pedidos esperando a Mídia + se o telão está ligado
  *   POST   /api/cars/call         { plate }  pede para mostrar a placa no telão (a Mídia aprova; fica 1 minuto)
  *   POST   /api/cars/:id/stop     tira a placa do telão antes do tempo
@@ -18,13 +18,13 @@ const router = Router();
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const callLimit = rateLimit(30, 60_000);
 
-/** Só quem está na escala de hoje (ou o admin); guarda o evento do dia em res.locals.eventId */
+/** Só quem está escalado no Estacionamento hoje (ou o admin); guarda o evento do dia em res.locals.eventId */
 const requireServing = [
   requireRole("admin", "agenda", "viewer"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const eventId = await servingToday(req.auth!.userId, req.auth!.role);
-      if (eventId === null) return res.status(403).json({ error: "Esta tela é para quem está na escala de hoje" });
+      if (eventId === null) return res.status(403).json({ error: "Esta tela é para quem está escalado no Estacionamento hoje" });
       res.locals.eventId = eventId || null;
       return next();
     } catch {
