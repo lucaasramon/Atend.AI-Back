@@ -12,7 +12,15 @@ import { CHURCH_CITY, locateNeighborhoods, pendingNeighborhoods } from "../servi
 import { CHURCH_PEOPLE } from "../services/churchPeople";
 
 const router = Router();
-const requireTeam = requireRole("admin", "agenda", "viewer");
+const requireTeam = requireRole("admin", "agenda", "viewer", "member");
+
+/**
+ * "mb é o membro das escalas do usuário $N": ligado à conta ou, sem conta ligada, com o mesmo WhatsApp
+ * (quem ganhou acesso de membro depois de já estar nas escalas)
+ */
+const MY_MEMBER = (n: number) => `(mb.user_id = $${n} OR (mb.user_id IS NULL AND EXISTS (
+  SELECT 1 FROM users u WHERE u.id = $${n} AND u.whatsapp IS NOT NULL
+     AND left(mb.whatsapp, 4) = left(u.whatsapp, 4) AND right(mb.whatsapp, 8) = right(u.whatsapp, 8))))`;
 
 /** Funções na igreja que veem o bloco pastoral (além dos administradores) */
 export const PASTOR_ROLES = ["Apóstolo(a)", "Bispo(a)", "Pastor(a)", "Pastor(a) auxiliar"];
@@ -31,6 +39,7 @@ router.get("/", requireTeam, async (req: Request, res: Response) => {
   try {
     const user = await queryOne<{ full_name: string | null; email: string }>("SELECT full_name, email FROM users WHERE id = $1", [me]);
     const pastor = await isPastor(req);
+    const member = req.auth!.role === "member";
     const today = localDate(new Date());
 
     const [tasks, acks, roster, events, birthdays, forms, myRequests] = await Promise.all([
@@ -67,18 +76,19 @@ router.get("/", requireTeam, async (req: Request, res: Response) => {
            JOIN ministries m ON m.id = r.ministry_id
            LEFT JOIN service_areas a ON a.id = r.area_id
            LEFT JOIN pops p ON p.id = a.pop_id
-          WHERE mb.user_id = $1 AND e.status <> 'rejected' AND e.starts_at > NOW() - INTERVAL '3 hours'
+          WHERE ${MY_MEMBER(1)} AND e.status <> 'rejected' AND e.starts_at > NOW() - INTERVAL '3 hours'
           ORDER BY e.starts_at
           LIMIT 3`,
         [me]
       ),
-      // Próximos 7 dias: eventos das minhas áreas (sem área = todos)
+      // Próximos 7 dias: eventos das minhas áreas (sem área = todos). Membro: só aprovados, próximos 30 dias
       query(
         `SELECT e.id, e.title, e.starts_at, e.location, e.status,
                 COALESCE((SELECT json_agg(json_build_object('name', mi.name, 'color', mi.color) ORDER BY mi.name)
                             FROM event_ministries em JOIN ministries mi ON mi.id = em.ministry_id WHERE em.event_id = e.id), '[]') AS ministries
            FROM events e
-          WHERE e.status <> 'rejected' AND e.starts_at > NOW() AND e.starts_at < NOW() + INTERVAL '7 days'
+          WHERE ${member ? "e.status = 'approved'" : "e.status <> 'rejected'"}
+            AND e.starts_at > NOW() AND e.starts_at < NOW() + INTERVAL '${member ? 30 : 7} days'
             AND (NOT EXISTS (SELECT 1 FROM user_ministries um WHERE um.user_id = $1)
                  OR EXISTS (SELECT 1 FROM event_ministries em JOIN user_ministries um ON um.ministry_id = em.ministry_id
                              WHERE em.event_id = e.id AND um.user_id = $1)
@@ -252,7 +262,7 @@ router.patch("/roster/:id", requireTeam, async (req: Request, res: Response) => 
     const row = await queryOne(
       `UPDATE roster_entries r SET checked = $1, updated_at = NOW()
          FROM members mb
-        WHERE r.id = $2 AND mb.id = r.member_id AND mb.user_id = $3
+        WHERE r.id = $2 AND mb.id = r.member_id AND ${MY_MEMBER(3)}
         RETURNING r.checked`,
       [JSON.stringify(Array.from(new Set(checked))), req.params.id, req.auth!.userId]
     );

@@ -10,7 +10,9 @@ import { Router, Request, Response } from "express";
 import { pool, query, queryOne } from "../db";
 import { requireAdmin, requireRole } from "../middleware/auth";
 import { rateLimit } from "../middleware/rateLimit";
-import { normalizePhone } from "../services/access";
+import {
+  accessLink, accessMessageText, createMemberUser, issueTemporaryAccess, normalizePhone, resolveWhatsapp, userByPhone,
+} from "../services/access";
 import { canManageEvent } from "../services/userAreas";
 import { locationLabel } from "../services/eventData";
 import { sendDirect } from "../services/notify";
@@ -32,8 +34,8 @@ function phone(raw: unknown): string | null {
 }
 
 const RELATIONS = ["visitor", "regular", "member"] as const;
-const GENDERS = ["M", "F"] as const;
-const MARITAL = ["single", "married", "divorced", "widowed"] as const;
+export const GENDERS = ["M", "F"] as const;
+export const MARITAL = ["single", "married", "divorced", "widowed"] as const;
 const FIELD_TYPES = ["text", "textarea", "number", "date", "select", "yesno"] as const;
 
 export interface FormField {
@@ -105,10 +107,23 @@ publicFormsRouter.post("/signup", limitPost, async (req: Request, res: Response)
     return res.status(400).json({ error: "Informe a data de nascimento" });
   }
   if (!b.consent) return res.status(400).json({ error: "É preciso concordar com o uso dos dados pela igreja" });
-  const email = str(b.email, 120);
+  const email = str(b.email, 120).toLowerCase();
   if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: "E-mail inválido" });
+  // Acesso à plataforma (membros e frequentadores): e-mail + senha
+  const wantsAccess = !!b.create_access && relation !== "visitor";
+  const password = typeof b.password === "string" ? b.password : "";
+  if (wantsAccess && !email) return res.status(400).json({ error: "Informe o e-mail para acessar a plataforma" });
+  if (wantsAccess && password.length < 6) return res.status(400).json({ error: "A senha deve ter no mínimo 6 caracteres" });
 
   try {
+    if (wantsAccess) {
+      if (await userByPhone(whatsapp)) {
+        return res.status(409).json({ error: "Este WhatsApp já tem acesso à plataforma. Entre com o seu e-mail ou use \"Esqueci minha senha\"." });
+      }
+      if (await queryOne("SELECT 1 FROM users WHERE email = $1", [email])) {
+        return res.status(409).json({ error: "Este e-mail já tem acesso à plataforma. Use outro e-mail ou \"Esqueci minha senha\"." });
+      }
+    }
     const valid = await query<{ id: string }>("SELECT id FROM ministries WHERE id = ANY($1::uuid[])", [
       (Array.isArray(b.interests) ? b.interests : []).filter((x: unknown) => typeof x === "string" && UUID_RE.test(x)),
     ]);
@@ -141,7 +156,14 @@ publicFormsRouter.post("/signup", limitPost, async (req: Request, res: Response)
         [name, whatsapp, notes]
       );
     }
-    return res.status(201).json({ ok: true, updated: !!row?.updated });
+    let access = false;
+    if (wantsAccess) {
+      // Número como está no WhatsApp (ex.: sem o 9 extra), para o robô conseguir mandar o "Esqueci minha senha"
+      const number = await resolveWhatsapp(whatsapp).then((r) => (r.exists && r.jid ? r.jid.split("@")[0] : whatsapp)).catch(() => whatsapp);
+      await createMemberUser({ name, email, whatsapp: number }, password);
+      access = true;
+    }
+    return res.status(201).json({ ok: true, updated: !!row?.updated, access, email: access ? email : undefined });
   } catch (error) {
     console.error("Signup error:", error);
     return res.status(500).json({ error: "Não foi possível enviar. Tente de novo." });
@@ -274,6 +296,57 @@ peopleRouter.get("/new-count", requireAdmin, async (_req: Request, res: Response
     const r = await queryOne<{ count: number }>("SELECT COUNT(*)::int AS count FROM people WHERE status = 'new'");
     return res.json({ count: r?.count || 0 });
   } catch (error) {
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
+// POST /api/people/:id/access  { email? }  (dá acesso de membro: gera o link de primeiro acesso para o admin mandar)
+peopleRouter.post("/:id/access", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const p = await queryOne<{ id: string; name: string; whatsapp: string; email: string | null }>(
+      "SELECT id, name, whatsapp, email FROM people WHERE id = $1",
+      [req.params.id]
+    );
+    if (!p) return res.status(404).json({ error: "Cadastro não encontrado" });
+    const email = (str(req.body?.email, 120) || p.email || "").toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: "Informe um e-mail válido para o login" });
+    if (await userByPhone(p.whatsapp)) return res.status(409).json({ error: "Esta pessoa já tem acesso à plataforma" });
+    if (await queryOne("SELECT 1 FROM users WHERE email = $1", [email])) return res.status(409).json({ error: "Já existe um usuário com esse e-mail" });
+
+    const number = await resolveWhatsapp(p.whatsapp).then((r) => (r.exists && r.jid ? r.jid.split("@")[0] : p.whatsapp)).catch(() => p.whatsapp);
+    const userId = await createMemberUser({ name: p.name, email, whatsapp: number });
+    if (!p.email) await query("UPDATE people SET email = $1 WHERE id = $2", [email, p.id]);
+    const { password, token } = await issueTemporaryAccess(userId);
+    await query(
+      "INSERT INTO audit_logs (admin_id, action, target_type, target_id, details) VALUES ($1, 'grant_member_access', 'user', $2, $3)",
+      [req.auth!.userId, userId, JSON.stringify({ email })]
+    );
+    return res.status(201).json({
+      person: await churchPerson(p.id),
+      access_link: accessLink(token),
+      access_message: accessMessageText({ full_name: p.name, email, whatsapp: number, role: "member" }, password, token),
+    });
+  } catch (error) {
+    console.error("Grant member access error:", error);
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
+// DELETE /api/people/:id/access  (remove o acesso de membro; o cadastro continua)
+peopleRouter.delete("/:id/access", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const p = await queryOne<{ whatsapp: string }>("SELECT whatsapp FROM people WHERE id = $1", [req.params.id]);
+    const user = p ? await userByPhone(p.whatsapp) : null;
+    if (!user) return res.status(404).json({ error: "Esta pessoa não tem acesso à plataforma" });
+    if (user.role !== "member") return res.status(400).json({ error: "Esta pessoa é da equipe: o acesso é gerenciado em Usuários" });
+    await query("DELETE FROM users WHERE id = $1 AND role = 'member'", [user.id]);
+    await query(
+      "INSERT INTO audit_logs (admin_id, action, target_type, target_id, details) VALUES ($1, 'remove_member_access', 'user', $2, $3)",
+      [req.auth!.userId, user.id, JSON.stringify({ email: user.email })]
+    );
+    return res.json(await churchPerson(req.params.id));
+  } catch (error) {
+    console.error("Remove member access error:", error);
     return res.status(500).json({ error: "Erro interno do servidor" });
   }
 });

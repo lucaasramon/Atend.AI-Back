@@ -32,6 +32,7 @@ import { areasRouter, eventRosterRouter, membersRouter, publicRosterRouter } fro
 import { eventFormsRouter, peopleRouter, publicFormsRouter } from "./routes/forms";
 import sermonRoutes from "./routes/sermons";
 import homeRoutes from "./routes/home";
+import meRoutes from "./routes/me";
 import { startScheduler } from "./services/scheduler";
 
 const app = express();
@@ -88,6 +89,7 @@ app.use("/api/public", publicFormsRouter); // formulários públicos (cadastro e
 app.use("/api/people", peopleRouter);
 app.use("/api/sermons", sermonRoutes);
 app.use("/api/home", homeRoutes);
+app.use("/api/me", meRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/ministries", ministryRoutes);
 app.use("/api/locations", locationRoutes);

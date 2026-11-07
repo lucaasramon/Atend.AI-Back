@@ -4,7 +4,8 @@ import jwt from "jsonwebtoken";
 import { v4 as uuidv4 } from "uuid";
 import { query, queryOne } from "../db";
 import { requireAuth } from "../middleware/auth";
-import { hashToken } from "../services/access";
+import { hashToken, issueResetToken, normalizePhone, sendResetMessage } from "../services/access";
+import { rateLimit } from "../middleware/rateLimit";
 
 const router = Router();
 
@@ -211,32 +212,104 @@ router.post("/create-client", requireAuth, async (req: Request, res: Response) =
   }
 });
 
-// POST /api/auth/reset-password  (token-based password reset)
-router.post("/reset-password", async (req: Request, res: Response) => {
-  const { token, password } = req.body;
-  if (!token || !password) {
-    return res.status(400).json({ error: "Token e nova senha são obrigatórios" });
-  }
-  if (password.length < 6) {
-    return res.status(400).json({ error: "Senha deve ter no mínimo 6 caracteres" });
-  }
-
+// POST /api/auth/change-password  { current, password }  (logado: troca a própria senha)
+router.post("/change-password", requireAuth, rateLimit(10, 15 * 60 * 1000), async (req: Request, res: Response) => {
+  const { current, password } = req.body || {};
+  if (!current) return res.status(400).json({ error: "Informe a senha atual" });
+  if (!password || password.length < 6) return res.status(400).json({ error: "A nova senha deve ter no mínimo 6 caracteres" });
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET!) as any;
-    if (payload.purpose !== "password_reset") {
-      return res.status(400).json({ error: "Token inválido" });
+    const user = await queryOne<{ password_hash: string }>("SELECT password_hash FROM users WHERE id = $1", [req.auth!.userId]);
+    if (!user || !(await bcrypt.compare(String(current), user.password_hash))) {
+      return res.status(400).json({ error: "A senha atual está incorreta" });
     }
-
-    const password_hash = await bcrypt.hash(password, 12);
-    const updated = await queryOne(
-      "UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING id",
-      [password_hash, payload.userId]
+    await query(
+      "UPDATE users SET password_hash = $1, setup_token_hash = NULL, setup_token_expires = NULL, updated_at = NOW() WHERE id = $2",
+      [await bcrypt.hash(password, 12), req.auth!.userId]
     );
-
-    if (!updated) return res.status(404).json({ error: "Usuário não encontrado" });
     return res.json({ success: true });
   } catch (error) {
-    return res.status(400).json({ error: "Token inválido ou expirado" });
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
+// ---------- Esqueci minha senha (link pelo WhatsApp) ----------
+
+const RESET_EXPIRED = "Este link expirou ou já foi usado. Peça um novo em \"Esqueci minha senha\".";
+const FORGOT_OK = { success: true }; // mesma resposta sempre: não revela se a conta existe
+
+// POST /api/auth/forgot-password  { login }  (e-mail ou WhatsApp)
+router.post("/forgot-password", rateLimit(5, 15 * 60 * 1000), async (req: Request, res: Response) => {
+  const login = String(req.body?.login || "").trim().toLowerCase();
+  if (!login) return res.status(400).json({ error: "Informe o seu e-mail ou WhatsApp" });
+  const phone = login.includes("@") ? "" : normalizePhone(login);
+  if (!login.includes("@") && phone.length < 12) return res.status(400).json({ error: "E-mail ou WhatsApp inválido" });
+  try {
+    // WhatsApp: mesmo DDD e mesmos 8 últimos dígitos (com ou sem o 9)
+    const user = await queryOne<{ id: string; full_name: string | null; whatsapp: string | null }>(
+      phone
+        ? "SELECT id, full_name, whatsapp FROM users WHERE whatsapp IS NOT NULL AND left(whatsapp, 4) = left($1, 4) AND right(whatsapp, 8) = right($1, 8) ORDER BY created_at LIMIT 1"
+        : "SELECT id, full_name, whatsapp FROM users WHERE email = $1",
+      [phone || login]
+    );
+    if (!user?.whatsapp) return res.json(FORGOT_OK);
+
+    // No máximo 1 link a cada 2 minutos e 5 por dia para a mesma conta
+    const recent = await queryOne<{ last2: number; today: number }>(
+      `SELECT COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '2 minutes')::int AS last2, COUNT(*)::int AS today
+         FROM audit_logs WHERE action = 'forgot_password' AND target_id = $1 AND created_at > NOW() - INTERVAL '1 day'`,
+      [user.id]
+    );
+    if (recent!.last2 > 0 || recent!.today >= 5) return res.json(FORGOT_OK);
+
+    const token = await issueResetToken(user.id);
+    await query(
+      "INSERT INTO audit_logs (admin_id, action, target_type, target_id, details) VALUES ($1, 'forgot_password', 'user', $1, $2)",
+      [user.id, JSON.stringify({ by: phone ? "whatsapp" : "email" })]
+    );
+    // Sem esperar a fila do robô: a resposta demora igual com ou sem conta
+    sendResetMessage({ full_name: user.full_name, whatsapp: user.whatsapp }, token).catch((e) => console.error("Forgot password send error:", e));
+    return res.json(FORGOT_OK);
+  } catch (error) {
+    console.error("Forgot password error:", error);
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
+// GET /api/auth/reset-password?token=...  (confere o link antes de mostrar o formulário)
+router.get("/reset-password", async (req: Request, res: Response) => {
+  const token = String(req.query.token || "");
+  if (!token) return res.status(400).json({ error: RESET_EXPIRED });
+  try {
+    const user = await queryOne<{ email: string; full_name: string | null }>(
+      "SELECT email, full_name FROM users WHERE setup_token_hash = $1 AND setup_token_expires > NOW()",
+      [hashToken(token)]
+    );
+    return user ? res.json(user) : res.status(400).json({ error: RESET_EXPIRED });
+  } catch (error) {
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
+// POST /api/auth/reset-password  { token, password }  (define a senha nova; o link vale uma vez só)
+router.post("/reset-password", async (req: Request, res: Response) => {
+  const { token, password } = req.body;
+  if (!token) return res.status(400).json({ error: RESET_EXPIRED });
+  if (!password || password.length < 6) return res.status(400).json({ error: "A senha deve ter no mínimo 6 caracteres" });
+  try {
+    const user = await queryOne<{ id: string; email: string }>(
+      `UPDATE users SET
+         password_hash = $1,
+         must_change_password = false,
+         setup_token_hash = NULL,
+         setup_token_expires = NULL,
+         updated_at = NOW()
+       WHERE setup_token_hash = $2 AND setup_token_expires > NOW()
+       RETURNING id, email`,
+      [await bcrypt.hash(password, 12), hashToken(String(token))]
+    );
+    return user ? res.json({ success: true, email: user.email }) : res.status(400).json({ error: RESET_EXPIRED });
+  } catch (error) {
+    return res.status(500).json({ error: "Erro interno do servidor" });
   }
 });
 

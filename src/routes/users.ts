@@ -94,10 +94,22 @@ router.post("/", requireAdmin, async (req: Request, res: Response) => {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) return res.status(400).json({ error: "E-mail inválido" });
 
   try {
-    const exists = await queryOne("SELECT id FROM users WHERE email = $1", [email.trim().toLowerCase()]);
-    if (exists) return res.status(409).json({ error: "Já existe um usuário com esse e-mail" });
+    const exists = await queryOne<{ id: string; role: string }>("SELECT id, role FROM users WHERE email = $1", [email.trim().toLowerCase()]);
+    if (exists && exists.role !== "member") return res.status(409).json({ error: "Já existe um usuário com esse e-mail" });
 
     const number = await checkWhatsapp(whatsapp);
+
+    // Já tem acesso de membro: passa para a equipe com a mesma senha (não gera acesso novo)
+    if (exists) {
+      await query(
+        "UPDATE users SET role = $1, full_name = $2, whatsapp = $3, church_role = $4, updated_at = NOW() WHERE id = $5",
+        [role, full_name.trim(), number, church_role || null, exists.id]
+      );
+      await setUserMinistries(exists.id, cleanIds(req.body.ministry_ids));
+      await syncMemberFromUser(exists.id);
+      await audit(req.auth!.userId, "promote_member", exists.id, { email: email.trim().toLowerCase(), role });
+      return res.json({ ...(await getUser(exists.id)), upgraded: true });
+    }
 
     // Senha aleatória provisória; a temporária de verdade é definida em grantAccess
     const created = await queryOne<{ id: string }>(

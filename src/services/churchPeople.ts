@@ -1,10 +1,10 @@
 /**
  * Lista da igreja: os Cadastros (formulário público) + os usuários da plataforma.
- * Todo usuário da equipe é membro. Quem também preencheu o formulário (mesmo WhatsApp: DDD + 8 últimos
+ * Todo usuário da plataforma (equipe ou perfil "member") é membro. Quem também preencheu o formulário (mesmo WhatsApp: DDD + 8 últimos
  * dígitos, cobre o número com ou sem o 9) aparece uma vez só, com os dados do formulário e o perfil do usuário.
  * Usuário sem formulário aparece só com nome, WhatsApp e e-mail; os dados dele são editados em Usuários.
  */
-const TEAM = "('admin', 'agenda', 'viewer')";
+const TEAM = "('admin', 'agenda', 'viewer', 'member')";
 const SAME_PHONE = (a: string, b: string) => `left(${a}, 4) = left(${b}, 4) AND right(${a}, 8) = right(${b}, 8)`;
 
 /** Use como tabela: `FROM (${CHURCH_PEOPLE}) p`. source = 'form' | 'user' */

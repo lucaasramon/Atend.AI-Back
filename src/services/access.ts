@@ -4,7 +4,7 @@
  */
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
-import { query } from "../db";
+import { query, queryOne } from "../db";
 import { getReminderSettings } from "./reminders";
 import { sendText } from "./evolution";
 
@@ -75,7 +75,29 @@ const ROLE_LABEL: Record<string, string> = {
   admin: "Administrador",
   agenda: "Agenda",
   viewer: "Visualizador",
+  member: "Membro",
 };
+
+/** Usuário da plataforma com o mesmo WhatsApp (mesmo DDD e 8 últimos dígitos: com ou sem o 9) */
+export const userByPhone = (phone: string) =>
+  queryOne<{ id: string; email: string; role: string }>(
+    `SELECT id, email, role FROM users
+      WHERE whatsapp IS NOT NULL AND left(whatsapp, 4) = left($1, 4) AND right(whatsapp, 8) = right($1, 8)
+      ORDER BY created_at LIMIT 1`,
+    [phone]
+  );
+
+/**
+ * Cria o acesso de membro (perfil "member"). Sem senha: fica com uma aleatória
+ * até a pessoa usar o link de primeiro acesso.
+ */
+export async function createMemberUser(p: { name: string; email: string; whatsapp: string }, password?: string): Promise<string> {
+  const row = await queryOne<{ id: string }>(
+    `INSERT INTO users (email, password_hash, role, full_name, whatsapp) VALUES ($1, $2, 'member', $3, $4) RETURNING id`,
+    [p.email.trim().toLowerCase(), await bcrypt.hash(password || crypto.randomBytes(16).toString("hex"), 12), p.name, p.whatsapp]
+  );
+  return row!.id;
+}
 
 type AccessUser = { full_name: string | null; email: string; whatsapp: string; role: string };
 
@@ -97,6 +119,39 @@ export function accessMessageText(user: AccessUser, password: string, token: str
     "",
     `O link vale por ${SETUP_TOKEN_DAYS} dias.`,
   ].join("\n");
+}
+
+// ---------- Esqueci minha senha ----------
+
+const RESET_TOKEN_MINUTES = 60;
+
+/**
+ * Link de redefinição de senha (vale 1 hora). Usa o mesmo token do primeiro acesso;
+ * a senha atual continua valendo até a pessoa usar o link.
+ */
+export async function issueResetToken(userId: string): Promise<string> {
+  const token = crypto.randomBytes(32).toString("hex");
+  await query(
+    `UPDATE users SET setup_token_hash = $1, setup_token_expires = NOW() + make_interval(mins => $2), updated_at = NOW() WHERE id = $3`,
+    [hashToken(token), RESET_TOKEN_MINUTES, userId]
+  );
+  return token;
+}
+
+/** Envia pelo robô da agenda o link para criar uma senha nova */
+export async function sendResetMessage(user: { full_name: string | null; whatsapp: string }, token: string): Promise<void> {
+  const firstName = (user.full_name || "").split(" ")[0];
+  const text = [
+    `Olá${firstName ? `, ${firstName}` : ""}! 🔐`,
+    "Recebemos um pedido para redefinir a sua senha do *D.Sync*.",
+    "",
+    `🔗 Crie uma senha nova por este link (vale ${RESET_TOKEN_MINUTES} minutos):`,
+    `${appUrl()}/reset-password?token=${token}`,
+    "",
+    "Se não foi você, ignore esta mensagem: a sua senha atual continua valendo.",
+  ].join("\n");
+  const { instance } = await getReminderSettings();
+  await sendText(instance, user.whatsapp, text);
 }
 
 /** Envia pelo robô da agenda a mensagem com link, login e senha temporária */
