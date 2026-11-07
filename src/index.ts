@@ -31,6 +31,10 @@ import ackRoutes from "./routes/acks";
 import { areasRouter, eventRosterRouter, membersRouter, publicRosterRouter } from "./routes/roster";
 import { eventFormsRouter, peopleRouter, publicFormsRouter } from "./routes/forms";
 import sermonRoutes from "./routes/sermons";
+import kidsRoutes from "./routes/kids";
+import carRoutes from "./routes/cars";
+import worshipRoutes from "./routes/worship";
+import screenRoutes from "./routes/screen";
 import homeRoutes from "./routes/home";
 import meRoutes from "./routes/me";
 import { startScheduler } from "./services/scheduler";
@@ -59,6 +63,8 @@ app.use(cors({
   },
   credentials: true,
 }));
+// Importar pregação de arquivo: até 15 MB, que em base64 vira ~20 MB
+app.use("/api/sermons/import", express.json({ limit: "22mb" }));
 app.use(express.json({ limit: "10mb" }));
 
 app.use("/api/auth", authRoutes);
@@ -88,6 +94,10 @@ app.use("/api/roster", publicRosterRouter);
 app.use("/api/public", publicFormsRouter); // formulários públicos (cadastro e inscrições)
 app.use("/api/people", peopleRouter);
 app.use("/api/sermons", sermonRoutes);
+app.use("/api/kids", kidsRoutes); // sala das crianças (código da criança e chamada no telão)
+app.use("/api/cars", carRoutes); // placa de carro no telão (quem está na escala do dia)
+app.use("/api/worship", worshipRoutes); // músicas da escala do louvor (Holyrics)
+app.use("/api/screen", screenRoutes); // pedidos para o telão: a Mídia aprova
 app.use("/api/home", homeRoutes);
 app.use("/api/me", meRoutes);
 app.use("/api/users", userRoutes);

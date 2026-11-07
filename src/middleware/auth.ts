@@ -42,7 +42,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-const AGENDA_PATHS = /^\/api\/(auth\/(me|change-password)|(events|ministries|locations|pops|media|members|areas|sermons|home|me)(\/.*)?)$/;
+const AGENDA_PATHS = /^\/api\/(auth\/(me|change-password)|(events|ministries|locations|pops|media|members|areas|sermons|kids|cars|worship|screen|home|me)(\/.*)?)$/;
 const MEMBER_PATHS = /^\/api\/(auth\/(me|change-password)|(home|me)(\/.*)?)$/;
 
 /** Exige um dos tipos de usuário informados */

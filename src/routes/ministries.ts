@@ -42,17 +42,17 @@ router.get("/", requireReader, async (_req: Request, res: Response) => {
   }
 });
 
-// POST /api/ministries  { name, group_jid?, leader_id?, pastor_id?, color?, is_media? }
+// POST /api/ministries  { name, group_jid?, leader_id?, pastor_id?, color?, is_media?, is_kids?, is_worship? }
 router.post("/", requireAdmin, async (req: Request, res: Response) => {
-  const { name, group_jid, leader_id, pastor_id, color, is_media } = req.body;
+  const { name, group_jid, leader_id, pastor_id, color, is_media, is_kids, is_worship } = req.body;
   if (!name?.trim()) return res.status(400).json({ error: "Nome é obrigatório" });
   const invalid = validate(req.body);
   if (invalid) return res.status(400).json({ error: invalid });
   try {
     const row = await queryOne<{ id: string }>(
-      `INSERT INTO ministries (name, group_jid, leader_id, pastor_id, color, is_media)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-      [name.trim(), group_jid || null, leader_id || null, pastor_id || null, color || null, !!is_media]
+      `INSERT INTO ministries (name, group_jid, leader_id, pastor_id, color, is_media, is_kids, is_worship)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+      [name.trim(), group_jid || null, leader_id || null, pastor_id || null, color || null, !!is_media, !!is_kids, !!is_worship]
     );
     await allowGroup(group_jid || null);
     return res.status(201).json(await queryOne(`${SELECT} WHERE m.id = $1`, [row!.id]));
@@ -76,7 +76,9 @@ router.patch("/:id", requireAdmin, async (req: Request, res: Response) => {
          leader_id = CASE WHEN $4 THEN NULLIF($5, '')::uuid ELSE leader_id END,
          pastor_id = CASE WHEN $6 THEN NULLIF($7, '')::uuid ELSE pastor_id END,
          color     = CASE WHEN $8 THEN NULLIF($9, '') ELSE color END,
-         is_media  = COALESCE($10, is_media)
+         is_media  = COALESCE($10, is_media),
+         is_kids   = COALESCE($12, is_kids),
+         is_worship = COALESCE($13, is_worship)
        WHERE id = $11 RETURNING id`,
       [
         b.name ?? null,
@@ -86,6 +88,8 @@ router.patch("/:id", requireAdmin, async (req: Request, res: Response) => {
         has("color"), b.color ?? "",
         typeof b.is_media === "boolean" ? b.is_media : null,
         req.params.id,
+        typeof b.is_kids === "boolean" ? b.is_kids : null,
+        typeof b.is_worship === "boolean" ? b.is_worship : null,
       ]
     );
     if (!row) return res.status(404).json({ error: "Ministério não encontrado" });

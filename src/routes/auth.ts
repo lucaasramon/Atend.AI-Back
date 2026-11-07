@@ -6,6 +6,9 @@ import { query, queryOne } from "../db";
 import { requireAuth } from "../middleware/auth";
 import { hashToken, issueResetToken, normalizePhone, sendResetMessage } from "../services/access";
 import { rateLimit } from "../middleware/rateLimit";
+import { hasKidsAccess } from "../services/kids";
+import { hasCarsAccess } from "../services/cars";
+import { hasMediaAccess } from "../services/screenRequests";
 
 const router = Router();
 
@@ -44,7 +47,12 @@ router.post("/login", async (req: Request, res: Response) => {
       { expiresIn: (process.env.JWT_EXPIRES_IN || "7d") as any }
     );
 
-    return res.json({ token, user: { id: user.id, email: user.email, role: user.role } });
+    const [kids_access, cars_access, media_access] = await Promise.all([
+      hasKidsAccess(user.id, user.role),
+      hasCarsAccess(user.id, user.role),
+      hasMediaAccess(user.id, user.role),
+    ]);
+    return res.json({ token, user: { id: user.id, email: user.email, role: user.role, kids_access, cars_access, media_access } });
   } catch (error) {
     console.error("Login error:", error);
     return res.status(500).json({ error: "Erro interno do servidor" });
@@ -167,6 +175,12 @@ router.get("/me", requireAuth, async (req: Request, res: Response) => {
       [req.auth!.userId]
     );
     if (!user) return res.status(404).json({ error: "Usuário não encontrado" });
+    // Sala das crianças: admin ou quem é da área "Crianças"
+    user.kids_access = await hasKidsAccess(user.id, user.role);
+    // Placa no telão: admin ou quem está na escala de hoje
+    user.cars_access = await hasCarsAccess(user.id, user.role);
+    // Mídia: aprova o que vai para o telão
+    user.media_access = await hasMediaAccess(user.id, user.role);
     return res.json(user);
   } catch (error) {
     return res.status(500).json({ error: "Erro interno do servidor" });

@@ -8,8 +8,16 @@ import crypto from "crypto";
 import { Router, Request, Response } from "express";
 import { query, queryOne } from "../db";
 import { requireRole } from "../middleware/auth";
+import { rateLimit } from "../middleware/rateLimit";
+import { holyrics, holyricsConfigured, HolyricsError } from "../services/holyrics";
+import { cancelPending, createRequest } from "../services/screenRequests";
+import { importSermon, SermonImportError } from "../services/sermonImport";
 
 const router = Router();
+/** Toques no telão: folga para o culto, mas segura cliques repetidos sem fim */
+const screenLimit = rateLimit(40, 60_000);
+/** Importar arquivo usa a IA (custo): alguns por hora já bastam */
+const importLimit = rateLimit(15, 60 * 60_000);
 const requireTeam = requireRole("admin", "agenda", "viewer");
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -67,7 +75,7 @@ async function visible(req: Request, id: string) {
   if (!s) return null;
   const mine = s.author_id === req.auth!.userId;
   if (!mine && !(await isMediaLeader(req.auth!.userId))) return null;
-  return { ...s, can_edit: mine };
+  return { ...s, can_edit: mine, screen_enabled: holyricsConfigured() };
 }
 
 // GET /api/sermons  (as minhas; o líder da Mídia vê as de todos)
@@ -139,6 +147,37 @@ router.put("/:id", requireTeam, async (req: Request, res: Response) => {
   }
 });
 
+// POST /api/sermons/import  { filename, data (base64), event_id? }
+// A IA lê o arquivo (PDF, Word, PowerPoint, foto...) e cria a pregação já em blocos.
+router.post("/import", requireTeam, importLimit, async (req: Request, res: Response) => {
+  const filename = str(req.body?.filename, 200).trim() || "pregacao";
+  const data = typeof req.body?.data === "string" ? req.body.data.replace(/^data:[^,]*,/, "") : "";
+  if (!data) return res.status(400).json({ error: "Envie o arquivo da pregação" });
+  try {
+    const imported = await importSermon(filename, Buffer.from(data, "base64"));
+    const blocks = cleanBlocks(imported.blocks);
+    const event_id = UUID_RE.test(req.body?.event_id || "") ? req.body.event_id : null;
+    const row = await queryOne<{ id: string }>(
+      "INSERT INTO sermons (author_id, title, bible_text, event_id, blocks) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+      [req.auth!.userId, imported.title.slice(0, 200), imported.bible_text.slice(0, 200) || null, event_id, JSON.stringify(blocks)]
+    );
+    return res.status(201).json({
+      sermon: await visible(req, row!.id),
+      summary: {
+        blocks: blocks.length,
+        verses: blocks.reduce((n, b) => n + b.verses.length, 0),
+        phrases: blocks.reduce((n, b) => n + b.phrases.length, 0),
+        projection_markers: imported.projection_markers,
+        dropped_phrases: imported.dropped_phrases,
+      },
+    });
+  } catch (error) {
+    if (error instanceof SermonImportError) return res.status(error.status).json({ error: error.message });
+    console.error("Import sermon error:", error);
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
 // POST /api/sermons/:id/preached  { started_at, ended_at, block_times: [{id, seconds}] }  (painel do púlpito)
 router.post("/:id/preached", requireTeam, async (req: Request, res: Response) => {
   const started = new Date(req.body?.started_at);
@@ -160,6 +199,49 @@ router.post("/:id/preached", requireTeam, async (req: Request, res: Response) =>
     return res.json(await visible(req, req.params.id));
   } catch (error) {
     return res.status(400).json({ error: "Pregação inválida" });
+  }
+});
+
+/** Resposta para erros do telão: mensagem pronta para o pastor */
+function screenError(res: Response, error: unknown) {
+  if (error instanceof HolyricsError) return res.status(502).json({ error: error.message });
+  console.error("Sermon screen error:", error);
+  return res.status(500).json({ error: "Erro interno do servidor" });
+}
+
+// POST /api/sermons/:id/screen  { text }  pede para mostrar a frase no telão (a Mídia aprova)
+// Só vai frase salva da pregação: ninguém manda texto solto para o telão.
+router.post("/:id/screen", requireTeam, screenLimit, async (req: Request, res: Response) => {
+  const text = str(req.body?.text, 600).trim();
+  if (!text) return res.status(400).json({ error: "Frase vazia" });
+  try {
+    const s = await visible(req, req.params.id);
+    if (!s) return res.status(404).json({ error: "Pregação não encontrada" });
+    const saved = (s.blocks as Block[]).some((b) => (b.phrases || []).some((p) => p.trim() === text));
+    if (!saved) return res.status(400).json({ error: "Salve a pregação antes de mandar esta frase para o telão" });
+    if (!holyricsConfigured()) return res.status(400).json({ error: "O telão ainda não foi configurado. Avise o administrador." });
+    // Uma frase por vez esperando: a nova substitui a anterior que ainda não foi aprovada
+    await cancelPending({ kind: "phrase", refId: s.id, userId: req.auth!.userId });
+    const request = await createRequest({ kind: "phrase", text, refId: s.id, payload: { text }, userId: req.auth!.userId });
+    return res.json({ request });
+  } catch (error) {
+    return screenError(res, error);
+  }
+});
+
+// DELETE /api/sermons/:id/screen  tira a frase do telão (e cancela a que ainda espera a Mídia)
+router.delete("/:id/screen", requireTeam, screenLimit, async (req: Request, res: Response) => {
+  try {
+    const s = await visible(req, req.params.id);
+    if (!s) return res.status(404).json({ error: "Pregação não encontrada" });
+    await cancelPending({ kind: "phrase", refId: s.id });
+    await holyrics("CloseCurrentQuickPresentation").catch((e) => {
+      // Sem apresentação rápida aberta (ainda não tinha sido aprovada): tudo certo
+      if (!(e instanceof HolyricsError)) throw e;
+    });
+    return res.json({ showing: null });
+  } catch (error) {
+    return screenError(res, error);
   }
 });
 
