@@ -1,7 +1,7 @@
 /**
  * Pregações: esboço em blocos (introdução, pontos, ilustração, apelo...) com versículos,
  * usado no painel do púlpito.
- * Quem vê: quem criou e o(s) líder(es) do ministério de Mídia (para preparar a projeção).
+ * Quem vê: quem criou, os administradores e o(s) líder(es) do ministério de Mídia (para preparar a projeção).
  * Quem edita: só quem criou.
  */
 import crypto from "crypto";
@@ -62,6 +62,11 @@ async function isMediaLeader(userId: string): Promise<boolean> {
   return !!(await queryOne("SELECT 1 FROM ministries WHERE is_media AND leader_id = $1 LIMIT 1", [userId]));
 }
 
+/** Administrador e líder da Mídia veem as pregações de todos (só leitura) */
+async function seesAll(req: Request): Promise<boolean> {
+  return req.auth!.role === "admin" || (await isMediaLeader(req.auth!.userId));
+}
+
 const SELECT = `
   SELECT s.*, u.full_name AS author_name, e.title AS event_title, e.starts_at AS event_starts_at
     FROM sermons s
@@ -74,21 +79,23 @@ async function visible(req: Request, id: string) {
   const s = await queryOne<any>(`${SELECT} WHERE s.id = $1`, [id]);
   if (!s) return null;
   const mine = s.author_id === req.auth!.userId;
-  if (!mine && !(await isMediaLeader(req.auth!.userId))) return null;
+  if (!mine && !(await seesAll(req))) return null;
   return { ...s, can_edit: mine, screen_enabled: holyricsConfigured() };
 }
 
-// GET /api/sermons  (as minhas; o líder da Mídia vê as de todos)
+// GET /api/sermons  (as minhas; o admin e o líder da Mídia veem as de todos)
 router.get("/", requireTeam, async (req: Request, res: Response) => {
   try {
+    const admin = req.auth!.role === "admin";
     const media = await isMediaLeader(req.auth!.userId);
     const rows = await query<any>(
       `${SELECT} WHERE ($2::boolean OR s.author_id = $1)
         ORDER BY (s.preached_at IS NOT NULL), COALESCE(e.starts_at, s.preached_at, s.updated_at) DESC`,
-      [req.auth!.userId, media]
+      [req.auth!.userId, admin || media]
     );
     return res.json({
       media_leader: media,
+      see_all: admin || media,
       sermons: rows.map((s) => ({ ...s, can_edit: s.author_id === req.auth!.userId })),
     });
   } catch (error) {

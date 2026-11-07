@@ -35,6 +35,7 @@ import kidsRoutes from "./routes/kids";
 import carRoutes from "./routes/cars";
 import worshipRoutes from "./routes/worship";
 import screenRoutes from "./routes/screen";
+import noticeRoutes from "./routes/notices";
 import homeRoutes from "./routes/home";
 import meRoutes from "./routes/me";
 import { startScheduler } from "./services/scheduler";
@@ -98,6 +99,7 @@ app.use("/api/kids", kidsRoutes); // sala das crianças (código da criança e c
 app.use("/api/cars", carRoutes); // placa de carro no telão (quem está na escala do dia)
 app.use("/api/worship", worshipRoutes); // músicas da escala do louvor (Holyrics)
 app.use("/api/screen", screenRoutes); // pedidos para o telão: a Mídia aprova
+app.use("/api/notices", noticeRoutes); // mensagens automáticas: ligar/desligar e quem recebe (admin)
 app.use("/api/home", homeRoutes);
 app.use("/api/me", meRoutes);
 app.use("/api/users", userRoutes);

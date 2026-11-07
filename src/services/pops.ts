@@ -4,6 +4,7 @@
  */
 import { query, queryOne } from "../db";
 import { getReminderSettings, localDate, sendToGroups } from "./reminders";
+import { messageEnabled } from "./messages";
 import { appUrl } from "./notify";
 
 interface PopRow {
@@ -69,6 +70,7 @@ export async function startPopRun(popId: string, day: string, force = false) {
 
 /** Rodada diária: inicia os POPs programados para hoje */
 export async function runPops(now = new Date()) {
+  if (!(await messageEnabled("pop_daily"))) return [];
   const today = localDate(now);
   const pops = await query<PopRow>(`${POP_SELECT} WHERE p.active = true AND p.recurrence <> 'none'`);
   const out = [];

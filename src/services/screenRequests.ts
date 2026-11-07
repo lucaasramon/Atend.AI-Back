@@ -10,6 +10,7 @@ import { query, queryOne } from "../db";
 import { holyrics } from "./holyrics";
 import { refreshScreenAlert } from "./screenAlert";
 import { appUrl, notifyUsers } from "./notify";
+import { messageEnabled, messageRecipients } from "./messages";
 
 /** Pedido sem resposta depois disso expira */
 export const REQUEST_TTL_MIN = 5;
@@ -78,7 +79,8 @@ export async function createRequest(r: { kind: RequestKind; text: string; refId?
 
 async function notifyMediaWhatsApp(r: ScreenRequest) {
   const who = await queryOne<{ full_name: string | null }>("SELECT full_name FROM users WHERE id = $1", [r.requested_by]);
-  const ids = (await mediaUserIds()).filter((id) => id !== r.requested_by);
+  if (!(await messageEnabled("screen_request"))) return;
+  const ids = (await messageRecipients("screen_request", await mediaUserIds())).filter((id) => id !== r.requested_by);
   if (!ids.length) return;
   const text = [
     `📺 *Pedido para o telão* (${KIND_LABEL[r.kind]}${who?.full_name ? ` · ${who.full_name}` : ""})`,

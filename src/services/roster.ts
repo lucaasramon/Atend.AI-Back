@@ -5,6 +5,7 @@
 import crypto from "crypto";
 import { query, queryOne } from "../db";
 import { TZ, getReminderSettings, localDate, sendToGroups } from "./reminders";
+import { messageEnabled } from "./messages";
 import { appUrl, sendDirect } from "./notify";
 
 export const hashRosterToken = (t: string) => crypto.createHash("sha256").update(t).digest("hex");
@@ -68,6 +69,7 @@ export async function sendRosterEntry(entryId: string): Promise<boolean> {
 
 /** Rodada diária: envia o checklist aos escalados dos próximos eventos (roster_days_before) */
 export async function runRosterNotifications(now = new Date()) {
+  if (!(await messageEnabled("roster_private"))) return { pending: 0, sent: 0, off: true };
   const row = await queryOne<{ value: string }>("SELECT value FROM system_settings WHERE key = 'roster_days_before'");
   const daysBefore = Math.max(0, parseInt(row?.value || "1") || 0);
   const pending = await query<{ id: string }>(
@@ -119,6 +121,7 @@ export async function rosterGroupText(eventId: string, ministryId: string): Prom
 
 /** Rodada diária: manda a escala de cada área ao grupo escolhido, ROSTER_GROUP_DAYS antes do evento */
 export async function runRosterGroups(now = new Date()) {
+  if (!(await messageEnabled("roster_group"))) return { pending: 0, sent: 0, errors: [] as string[], off: true };
   const due = await query<{ event_id: string; ministry_id: string; group_jid: string }>(
     `SELECT g.event_id, g.ministry_id, g.group_jid FROM roster_groups g JOIN events e ON e.id = g.event_id
       WHERE g.sent_at IS NULL AND e.status = 'approved' AND e.starts_at > NOW()

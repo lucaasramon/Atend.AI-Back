@@ -4,6 +4,7 @@ import { requireAdmin, requireRole } from "../middleware/auth";
 import { fetchGroups } from "../services/evolution";
 import { EVENT_COLUMNS, locationLabel } from "../services/eventData";
 import { adminIds, appUrl, notifyUsers } from "../services/notify";
+import { messageEnabled, messageRecipients } from "../services/messages";
 import { eventOffsets, getAllowedGroups, getReminderSettings, parseOffsets, renderMessage, reminderSendAt, runReminders, TZ } from "../services/reminders";
 import { runRemindersIfPastToday } from "../services/scheduler";
 import { previewSummary, SummaryKind } from "../services/summaries";
@@ -113,7 +114,8 @@ async function notifyApprovers(ev: any, changed: boolean) {
     "",
     `Aprovar ou recusar: ${appUrl()}/admin/aprovacoes`,
   ].join("\n");
-  await notifyUsers(await adminIds(), text);
+  if (!(await messageEnabled("event_pending"))) return;
+  await notifyUsers(await messageRecipients("event_pending", await adminIds()), text);
 }
 
 const PUBLIC_FIELDS = "id, title, description, location, starts_at, ends_at";
@@ -487,8 +489,8 @@ router.post("/import", requireEditor, async (req: Request, res: Response) => {
         runRemindersIfPastToday();
         onEventsApproved(createdIds).catch((err) => console.error("onEventsApproved:", err));
       } else {
-        notifyUsers(
-          await adminIds(),
+        if (await messageEnabled("event_pending")) notifyUsers(
+          await messageRecipients("event_pending", await adminIds()),
           `📝 *${createdCount} eventos importados aguardando aprovação*\n\nAprovar: ${appUrl()}/admin/aprovacoes`
         ).catch(() => {});
       }
@@ -598,7 +600,7 @@ router.post("/:id/approve", requireAdmin, async (req: Request, res: Response) =>
     const ev = await fullEvent(row.id);
     runRemindersIfPastToday();
     onEventsApproved(rows.map((r) => r.id)).catch((err) => console.error("onEventsApproved:", err));
-    if (row.created_by && row.created_by !== req.auth!.userId) {
+    if (row.created_by && row.created_by !== req.auth!.userId && (await messageEnabled("event_approved"))) {
       const series = rows.length > 1 ? ` e mais ${rows.length - 1} data(s) da série` : "";
       notifyUsers([row.created_by], `✅ Seu evento *${ev.title}* (${whenText(ev.starts_at)})${series} foi aprovado e já está na agenda.`)
         .catch(() => {});
@@ -621,7 +623,7 @@ router.post("/:id/reject", requireAdmin, async (req: Request, res: Response) => 
     const row = rows.find((r) => r.id === req.params.id);
     if (!row) return res.status(404).json({ error: "Evento não encontrado" });
     const ev = await fullEvent(row.id);
-    if (row.created_by && row.created_by !== req.auth!.userId) {
+    if (row.created_by && row.created_by !== req.auth!.userId && (await messageEnabled("event_rejected"))) {
       notifyUsers(
         [row.created_by],
         `❌ Seu evento *${ev.title}* (${whenText(ev.starts_at)}) não foi aprovado.${reason ? `\nMotivo: ${reason}` : ""}\n\nVocê pode ajustar e enviar de novo pela agenda.`

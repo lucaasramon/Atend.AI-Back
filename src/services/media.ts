@@ -4,6 +4,7 @@
  */
 import { query } from "../db";
 import { TZ, getReminderSettings, localDate, sendToGroups } from "./reminders";
+import { messageEnabled } from "./messages";
 import { appUrl, sendDirect } from "./notify";
 
 export const MEDIA_TYPES: Record<string, string> = {
@@ -48,6 +49,7 @@ const line = (d: Due, today: string) => {
 };
 
 export async function runMediaReminders(now = new Date()) {
+  if (!(await messageEnabled("media_due"))) return { demands: 0, reminded: 0, off: true };
   const today = localDate(now);
   const due = await query<Due>(
     `SELECT d.id, d.title, d.type, d.due_at, d.is_group, d.assignee_id, u.whatsapp, u.full_name, e.title AS event_title

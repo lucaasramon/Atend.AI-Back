@@ -4,6 +4,7 @@ import { requireRole } from "../middleware/auth";
 import { EVENT_MEDIA_PLAN, MEDIA_TYPES } from "../services/media";
 import { notifyUsers } from "../services/notify";
 import { TZ } from "../services/reminders";
+import { messageEnabled } from "../services/messages";
 
 const router = Router();
 const requireEditor = requireRole("admin", "agenda");
@@ -20,6 +21,7 @@ const SELECT = `
 
 /** Avisa o responsável (individual) quando recebe uma demanda nova */
 async function notifyAssignee(id: string) {
+  if (!(await messageEnabled("media_new"))) return;
   const d = await queryOne<any>(`${SELECT} WHERE d.id = $1`, [id]);
   if (!d?.assignee_id || d.is_group) return;
   const due = new Date(d.due_at).toLocaleString("pt-BR", { timeZone: TZ, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });

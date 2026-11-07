@@ -11,6 +11,7 @@ import { query, queryOne } from "../db";
 import { holyrics } from "./holyrics";
 import { notifyUsers, adminIds } from "./notify";
 import { mediaUserIds } from "./screenRequests";
+import { messageEnabled, messageRecipients } from "./messages";
 import { TZ } from "./reminders";
 
 export interface SentSong {
@@ -184,6 +185,7 @@ export function notifyMediaLater(eventId: string) {
 }
 
 async function notifyMedia(eventId: string) {
+  if (!(await messageEnabled("worship_changed"))) return;
   const { remove, order_changed } = await adjustments(eventId);
   if (!remove.length && !order_changed) return;
   const event = await queryOne<{ title: string; starts_at: Date }>("SELECT title, starts_at FROM events WHERE id = $1", [eventId]);
@@ -201,6 +203,7 @@ async function notifyMedia(eventId: string) {
     .join("\n");
   if (lastNotice.get(eventId) === text) return; // mesma mudança: não repete
   lastNotice.set(eventId, text);
-  const ids = await mediaUserIds();
+  const ids = await messageRecipients("worship_changed", await mediaUserIds());
   await notifyUsers(ids.length ? ids : await adminIds(), text);
 }
+

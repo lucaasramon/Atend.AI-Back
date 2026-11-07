@@ -3,6 +3,7 @@
  * no privado as tarefas pendentes que vencem em 2 dias e no dia do prazo.
  */
 import { query } from "../db";
+import { messageEnabled } from "./messages";
 import { TZ, localDate } from "./reminders";
 import { appUrl, sendDirect } from "./notify";
 
@@ -20,6 +21,7 @@ interface DueTask {
 }
 
 export async function runTaskReminders(now = new Date()) {
+  if (!(await messageEnabled("task_reminder"))) return { people: 0, tasks: 0, off: true };
   const today = localDate(now);
   const tasks = await query<DueTask>(
     `SELECT t.id, t.title, to_char(t.due_date, 'YYYY-MM-DD') AS due_date, e.title AS event_title, e.starts_at,
