@@ -240,6 +240,17 @@ export const MESSAGES: MessageDef[] = [
     example: "Olá, Ana! Seu acesso ao D.Sync: …/primeiro-acesso · login ana@email.com · senha temporária …",
   },
   {
+    key: "team_invite",
+    group: "acesso",
+    title: "Convite para a equipe",
+    when: "Quando o admin convida alguém pela tela de Usuários.",
+    channel: "private",
+    audience: "A pessoa convidada",
+    essential: true,
+    configure: { label: "Usuários", path: "/admin/usuarios" },
+    example: "Olá, Ana! Você foi convidado(a) para a equipe da *Mídia* no D.Sync. Complete o seu cadastro (nome, e-mail e senha) por este link: …/convite",
+  },
+  {
     key: "password_reset",
     group: "acesso",
     title: "Esqueci minha senha",

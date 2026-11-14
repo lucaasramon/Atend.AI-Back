@@ -30,6 +30,7 @@ import mediaRoutes from "./routes/media";
 import ackRoutes from "./routes/acks";
 import { areasRouter, eventRosterRouter, membersRouter, publicRosterRouter } from "./routes/roster";
 import { eventFormsRouter, peopleRouter, publicFormsRouter } from "./routes/forms";
+import { inviteRouter, publicInviteRouter } from "./routes/invites";
 import sermonRoutes from "./routes/sermons";
 import kidsRoutes from "./routes/kids";
 import carRoutes from "./routes/cars";
@@ -92,6 +93,7 @@ app.use("/api/acks", ackRoutes);
 app.use("/api/members", membersRouter);
 app.use("/api/areas", areasRouter);
 app.use("/api/roster", publicRosterRouter);
+app.use("/api/public/invites", publicInviteRouter); // convite para a equipe: a pessoa completa o cadastro
 app.use("/api/public", publicFormsRouter); // formulários públicos (cadastro e inscrições)
 app.use("/api/people", peopleRouter);
 app.use("/api/sermons", sermonRoutes);
@@ -103,6 +105,7 @@ app.use("/api/notices", noticeRoutes); // mensagens automáticas: ligar/desligar
 app.use("/api/home", homeRoutes);
 app.use("/api/me", meRoutes);
 app.use("/api/users", userRoutes);
+app.use("/api/invites", inviteRouter); // convites para a equipe (admin)
 app.use("/api/ministries", ministryRoutes);
 app.use("/api/locations", locationRoutes);
 
