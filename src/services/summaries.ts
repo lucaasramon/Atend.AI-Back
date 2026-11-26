@@ -63,6 +63,7 @@ async function eventsBetween(start: Date, end: Date): Promise<SummaryEvent[]> {
   return query<SummaryEvent>(
     `SELECT ${EVENT_COLUMNS} FROM events e
       WHERE e.starts_at >= $1 AND e.starts_at < $2 AND e.status = 'approved'
+        AND NOT e.calendar_only -- "só no calendário" (ex.: recesso) não entra nos resumos
       ORDER BY e.starts_at`,
     [start, end]
   );

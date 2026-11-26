@@ -106,8 +106,8 @@ async function checkNewContactLimit(number: string) {
   }
 }
 
-/** Envia mensagem de texto para um número ou grupo (ex: 1203630xxx@g.us), pela fila */
-export function sendText(instanceName: string, number: string, text: string): Promise<unknown> {
+/** Coloca um envio na fila da instância (pausa entre envios + limite de conversas novas) */
+function enqueue(instanceName: string, number: string, send: () => Promise<unknown>): Promise<unknown> {
   const previous = queues.get(instanceName) || Promise.resolve();
   const job = previous
     .catch(() => {})
@@ -117,8 +117,7 @@ export function sendText(instanceName: string, number: string, text: string): Pr
       const dm = isPrivate(number);
       if (dm) await checkNewContactLimit(number);
       try {
-        // "delay" faz a Evolution mostrar "digitando…" antes de enviar
-        const result = await evo("POST", `/message/sendText/${instanceName}`, { number, text, delay: typingMs(text) });
+        const result = await send();
         if (dm) await query("INSERT INTO whatsapp_dm_log (number) VALUES ($1)", [digits(number)]).catch(() => {});
         return result;
       } finally {
@@ -127,6 +126,35 @@ export function sendText(instanceName: string, number: string, text: string): Pr
     });
   queues.set(instanceName, job);
   return job;
+}
+
+/** Envia mensagem de texto para um número ou grupo (ex: 1203630xxx@g.us), pela fila */
+export function sendText(instanceName: string, number: string, text: string): Promise<unknown> {
+  // "delay" faz a Evolution mostrar "digitando…" antes de enviar
+  return enqueue(instanceName, number, () =>
+    evo("POST", `/message/sendText/${instanceName}`, { number, text, delay: typingMs(text) })
+  );
+}
+
+/** Envia uma imagem (base64) com legenda para um número ou grupo, pela fila */
+export function sendImage(
+  instanceName: string,
+  number: string,
+  image: { mime: string; base64: string },
+  caption: string
+): Promise<unknown> {
+  const ext = image.mime.split("/")[1] === "jpeg" ? "jpg" : image.mime.split("/")[1];
+  return enqueue(instanceName, number, () =>
+    evo("POST", `/message/sendMedia/${instanceName}`, {
+      number,
+      mediatype: "image",
+      mimetype: image.mime,
+      media: image.base64,
+      fileName: `evento.${ext}`,
+      caption,
+      delay: typingMs(caption),
+    })
+  );
 }
 
 /** Lista os grupos dos quais a instância participa */

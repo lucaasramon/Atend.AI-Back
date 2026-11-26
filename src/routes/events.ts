@@ -11,6 +11,7 @@ import { previewSummary, SummaryKind } from "../services/summaries";
 import { isRepeatSpec, occurrences, occurrencesFromSpec, validateRepeat, validateRepeatSpec } from "../services/recurrence";
 import { onEventsApproved } from "../services/acks";
 import { canManageEvent, userMinistryIds } from "../services/userAreas";
+import { deleteOrphanImages, getImage, parseImageBody, saveImage } from "../services/eventImages";
 import crypto from "crypto";
 
 const router = Router();
@@ -145,6 +146,20 @@ router.get("/public", async (req: Request, res: Response) => {
   }
 });
 
+// GET /api/events/images/:imageId  (sem login — o id é aleatório; usado na tela e no calendário)
+router.get("/images/:imageId", async (req: Request, res: Response) => {
+  if (!UUID_RE.test(req.params.imageId)) return res.status(404).end();
+  try {
+    const img = await getImage(req.params.imageId);
+    if (!img) return res.status(404).end();
+    res.setHeader("Content-Type", img.mime);
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable"); // imagem trocada ganha id novo
+    return res.send(img.data);
+  } catch (error) {
+    return res.status(500).end();
+  }
+});
+
 // GET /api/events/config  (configuração dos lembretes, somente leitura)
 router.get("/config", requireReader, async (_req: Request, res: Response) => {
   try {
@@ -239,7 +254,8 @@ router.get("/groups", requireAdmin, async (_req: Request, res: Response) => {
 // Body: { groups: string[] }
 router.put("/allowed-groups", requireAdmin, async (req: Request, res: Response) => {
   const groups: unknown = req.body?.groups;
-  if (!Array.isArray(groups) || !groups.every((g) => typeof g === "string" && /^\d+@g\.us$/.test(g))) {
+  // Grupos novos: 120363...@g.us; grupos antigos: <número do criador>-<timestamp>@g.us
+  if (!Array.isArray(groups) || !groups.every((g) => typeof g === "string" && /^\d+(-\d+)?@g\.us$/.test(g))) {
     return res.status(400).json({ error: "groups deve ser uma lista de IDs de grupo (xxx@g.us)" });
   }
 
@@ -332,8 +348,11 @@ interface NewEvent {
   reminders_off?: boolean;
   /** Também avisar as pessoas no privado (padrão: só grupos) */
   notify_private?: boolean;
+  /** Só aparece no calendário: o robô não fala dele no WhatsApp (ex.: recesso) */
+  calendar_only?: boolean;
   category?: string | null;
   series_id?: string | null;
+  image_id?: string | null;
   ministry_ids?: string[];
   location_ids?: string[];
 }
@@ -342,13 +361,16 @@ interface NewEvent {
 async function insertEvent(e: NewEvent, userId: string, approved: boolean, isAdmin: boolean): Promise<string> {
   const row = await queryOne<{ id: string }>(
     `INSERT INTO events (title, description, location, starts_at, ends_at, is_public, group_jid, reminder_offsets,
-                         category, series_id, created_by, status, approved_by, approved_at, reminders_off, notify_private)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::varchar, $13, CASE WHEN $12::varchar = 'approved' THEN NOW() END, $14, $15)
+                         category, series_id, created_by, status, approved_by, approved_at, reminders_off, notify_private, image_id, calendar_only)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::varchar, $13, CASE WHEN $12::varchar = 'approved' THEN NOW() END, $14, $15, $16, $17)
      RETURNING id`,
     [
       e.title, e.description || null, e.location || null, e.starts_at, e.ends_at || null, e.is_public ?? true,
       e.group_jid || null, e.reminder_offsets ?? null, e.category || null, e.series_id || null, userId,
-      approved ? "approved" : "pending", approved && isAdmin ? userId : null, !!e.reminders_off, e.notify_private === true,
+      approved ? "approved" : "pending", approved && isAdmin ? userId : null,
+      // Só no calendário: sem lembretes e sem privado
+      !!e.reminders_off || !!e.calendar_only, e.notify_private === true && !e.calendar_only,
+      e.image_id || null, !!e.calendar_only,
     ]
   );
   try {
@@ -370,6 +392,8 @@ router.post("/", requireEditor, async (req: Request, res: Response) => {
   if (category && !CATEGORIES.includes(category)) return res.status(400).json({ error: "Categoria inválida" });
   const repeatError = spec ? validateRepeatSpec(spec) : validateRepeat(repeat);
   if (repeatError) return res.status(400).json({ error: repeatError });
+  const image = parseImageBody(req.body.image);
+  if ("error" in image) return res.status(400).json({ error: image.error });
   if (group_jid && !(await getAllowedGroups()).includes(group_jid)) {
     return res.status(400).json({ error: "group_jid não permitido: use um grupo de allowed_groups" });
   }
@@ -385,6 +409,7 @@ router.post("/", requireEditor, async (req: Request, res: Response) => {
       reminder_offsets: offsets.value,
       reminders_off: req.body.reminders_off === true,
       notify_private: req.body.notify_private === true,
+      calendar_only: req.body.calendar_only === true,
       ministry_ids: bodyIds(req.body.ministry_ids),
       location_ids: bodyIds(req.body.location_ids),
     };
@@ -396,6 +421,8 @@ router.post("/", requireEditor, async (req: Request, res: Response) => {
         : [{ starts_at: new Date(starts_at), ends_at: ends_at ? new Date(ends_at) : null }];
     if (!dates.length) return res.status(400).json({ error: "Nenhuma data no período de repetição" });
     const seriesId = dates.length > 1 ? crypto.randomUUID() : null;
+    // Imagem opcional: uma só para todas as datas da série
+    if (image.set && image.image) base.image_id = await saveImage(image.image);
 
     for (const d of dates) {
       created.push(await insertEvent({ ...base, ...d, series_id: seriesId }, req.auth!.userId, approved, isAdmin));
@@ -411,6 +438,7 @@ router.post("/", requireEditor, async (req: Request, res: Response) => {
     console.error("Create event error:", error);
     // Falhou no meio da série: desfaz o que já foi criado
     if (created.length) await query("DELETE FROM events WHERE id = ANY($1)", [created]).catch(() => {});
+    deleteOrphanImages().catch(() => {});
     return res.status(400).json({ error: "Dados inválidos" });
   }
 });
@@ -508,6 +536,8 @@ router.patch("/:id", requireEditor, async (req: Request, res: Response) => {
   const offsets = bodyOffsets(req.body.reminder_offsets);
   let ministryIds = bodyIds(req.body.ministry_ids);
   const locationIds = bodyIds(req.body.location_ids);
+  const image = parseImageBody(req.body.image);
+  if ("error" in image) return res.status(400).json({ error: image.error });
   if (category && !CATEGORIES.includes(category)) return res.status(400).json({ error: "Categoria inválida" });
   if (group_jid && !(await getAllowedGroups()).includes(group_jid)) {
     return res.status(400).json({ error: "group_jid não permitido: use um grupo de allowed_groups" });
@@ -539,15 +569,24 @@ router.patch("/:id", requireEditor, async (req: Request, res: Response) => {
          group_jid = CASE WHEN $8::text IS NULL THEN group_jid ELSE NULLIF($8, '') END,
          reminder_offsets = CASE WHEN $9 THEN $10::int[] ELSE reminder_offsets END,
          category = CASE WHEN $12 THEN NULLIF($13, '') ELSE category END,
-         reminders_off = COALESCE($14, reminders_off),
-         notify_private = COALESCE($15, notify_private)
+         calendar_only = COALESCE($16, calendar_only),
+         -- Só no calendário: sem lembretes e sem privado
+         reminders_off = COALESCE($16, calendar_only) OR COALESCE($14, reminders_off),
+         notify_private = NOT COALESCE($16, calendar_only) AND COALESCE($15, notify_private)
        WHERE id = $7`,
       [title ?? null, description ?? null, location ?? null, starts_at ?? null, ends_at ?? null, is_public ?? null,
        req.params.id, group_jid ?? null, offsets.set, offsets.value, "ends_at" in req.body,
        "category" in req.body, category ?? "", typeof req.body.reminders_off === "boolean" ? req.body.reminders_off : null,
-       typeof req.body.notify_private === "boolean" ? req.body.notify_private : null]
+       typeof req.body.notify_private === "boolean" ? req.body.notify_private : null,
+       typeof req.body.calendar_only === "boolean" ? req.body.calendar_only : null]
     );
     await setLinks(req.params.id, ministryIds, locationIds);
+    // Imagem: null remove; nova substitui (só nesta data, como o resto da edição)
+    if (image.set) {
+      const imageId = image.image ? await saveImage(image.image) : null;
+      await query("UPDATE events SET image_id = $1 WHERE id = $2", [imageId, req.params.id]);
+      deleteOrphanImages().catch(() => {});
+    }
     let ev = await fullEvent(req.params.id);
 
     // Evento remarcado: zera os lembretes para que sejam reenviados com a nova data
@@ -653,6 +692,7 @@ router.delete("/:id", requireEditor, async (req: Request, res: Response) => {
             [req.params.id]
           )
         : await query("DELETE FROM events WHERE id = $1 RETURNING id", [req.params.id]);
+    deleteOrphanImages().catch(() => {});
     return res.json({ success: true, deleted: rows.length });
   } catch (error) {
     return res.status(500).json({ error: "Erro interno do servidor" });

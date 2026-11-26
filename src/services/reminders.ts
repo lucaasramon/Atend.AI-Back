@@ -4,8 +4,12 @@
  * as do próprio evento (events.reminder_offsets) ou o padrão (reminders_offsets).
  */
 import { query } from "../db";
-import { sendText } from "./evolution";
+import { sendImage, sendText } from "./evolution";
 import { EVENT_COLUMNS, EventLocation, EventMinistry, locationLabel } from "./eventData";
+import { getImage } from "./eventImages";
+
+/** Legenda de imagem no WhatsApp: acima disso o texto vai numa mensagem separada */
+const CAPTION_MAX = 1000;
 
 export const TZ = "America/Sao_Paulo";
 export const TZ_OFFSET = "-03:00"; // Brasil sem horário de verão desde 2019
@@ -27,6 +31,7 @@ export interface EventRow {
   location: string | null;
   starts_at: Date;
   group_jid?: string | null;
+  image_id?: string | null;
   reminder_offsets?: number[] | null;
   ministries?: EventMinistry[];
   locations?: EventLocation[];
@@ -81,7 +86,8 @@ export async function sendToGroups(
   instance: string,
   groups: string[],
   text: string,
-  label: string
+  label: string,
+  image?: { mime: string; base64: string } | null
 ): Promise<{ sent: number; errors: string[] }> {
   const allowed = await getAllowedGroups();
   const out = { sent: 0, errors: [] as string[] };
@@ -91,7 +97,20 @@ export async function sendToGroups(
       continue;
     }
     try {
-      await sendText(instance, g, text);
+      if (image) {
+        try {
+          // Legenda longa demais: manda a foto sozinha e o texto em seguida
+          const long = text.length > CAPTION_MAX;
+          await sendImage(instance, g, image, long ? "" : text);
+          if (long) await sendText(instance, g, text);
+        } catch (err: any) {
+          // A imagem falhou: o aviso sai ao menos em texto
+          console.error(`[lembretes] ${label}: falha ao enviar imagem, enviando só o texto:`, err.message);
+          await sendText(instance, g, text);
+        }
+      } else {
+        await sendText(instance, g, text);
+      }
       out.sent++;
     } catch (err: any) {
       out.errors.push(`${label}: ${err.message}`);
@@ -154,7 +173,7 @@ export async function runReminders(): Promise<{ sent: number; skipped: number; e
     `SELECT ${EVENT_COLUMNS},
             COALESCE((SELECT array_agg(r.offset_days) FROM event_reminders_sent r WHERE r.event_id = e.id), '{}') AS sent_offsets
        FROM events e
-      WHERE e.starts_at > NOW() AND e.status = 'approved' AND NOT e.reminders_off`
+      WHERE e.starts_at > NOW() AND e.status = 'approved' AND NOT e.reminders_off AND NOT e.calendar_only`
   );
 
   const now = new Date();
@@ -177,7 +196,9 @@ export async function runReminders(): Promise<{ sent: number; skipped: number; e
     );
     if (!claimed.length) continue;
 
-    const r = await sendToGroups(cfg.instance, targets, renderMessage(cfg.template, ev, daysUntil), ev.title);
+    const img = ev.image_id ? await getImage(ev.image_id).catch(() => null) : null;
+    const image = img ? { mime: img.mime, base64: img.data.toString("base64") } : null;
+    const r = await sendToGroups(cfg.instance, targets, renderMessage(cfg.template, ev, daysUntil), ev.title, image);
     result.errors.push(...r.errors);
     if (!r.sent) {
       // Nenhum grupo recebeu: libera a reserva para tentar de novo na próxima rodada
