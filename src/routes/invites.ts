@@ -12,7 +12,8 @@ import { rateLimit } from "../middleware/rateLimit";
 import { resolveWhatsapp, userByPhone } from "../services/access";
 import { CHURCH_ROLES, LEADER_BLOCKED_CHURCH_ROLES, leaderMinistryIds } from "../services/userAreas";
 import {
-  Invite, InviteError, acceptInvite, inviteLink, inviteMessage, inviteUsed, openInviteByToken, publicInvite, renewToken, sendInvite,
+  Invite, InviteError, acceptInvite, acceptLink, inviteLink, inviteMessage, inviteUsed, newLinkToken, openInviteByToken, openLinkByToken,
+  openLinkUrl, publicInvite, publicLink, renewToken, sendInvite,
 } from "../services/invites";
 import { hasKidsAccess } from "../services/kids";
 import { hasCarsAccess } from "../services/cars";
@@ -176,6 +177,90 @@ inviteRouter.delete("/:id", requireTeam, async (req: Request, res: Response) => 
   }
 });
 
+// ---------- Link de convite aberto (admin e líderes) ----------
+
+const LINK_LIST = `
+  SELECT l.id, l.token, l.label, l.role, l.church_role, l.ministry_ids, l.expires_at, l.uses, l.created_at,
+         cu.full_name AS created_by_name,
+         CASE WHEN l.expires_at IS NOT NULL AND l.expires_at <= NOW() THEN 'expired' ELSE 'active' END AS status,
+         (SELECT COALESCE(json_agg(json_build_object('id', m.id, 'name', m.name, 'color', m.color) ORDER BY m.name), '[]')
+            FROM ministries m WHERE m.id = ANY(l.ministry_ids)) AS ministries
+    FROM invite_links l
+    LEFT JOIN users cu ON cu.id = l.created_by`;
+const LINK_SCOPE = "(l.created_by = $1 OR l.ministry_ids && $2::uuid[])";
+const withUrl = (l: any) => (l ? { ...l, link: openLinkUrl(l.token) } : l);
+
+// GET /api/invites/links  (links ativos)
+inviteRouter.get("/links", requireTeam, async (req: Request, res: Response) => {
+  try {
+    const scope = await inviteScope(req, res);
+    if (!scope) return;
+    const rows = await query(
+      `${LINK_LIST} WHERE l.revoked_at IS NULL AND ($2::uuid[] IS NULL OR ${LINK_SCOPE}) ORDER BY l.created_at DESC`,
+      [req.auth!.userId, scope.areas]
+    );
+    return res.json(rows.map(withUrl));
+  } catch (error) {
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
+// POST /api/invites/links  { label?, role, church_role?, ministry_ids?, expires_days? }
+inviteRouter.post("/links", requireTeam, async (req: Request, res: Response) => {
+  const b = req.body || {};
+  const label = str(b.label, 80) || null;
+  let role = str(b.role, 20);
+  const church_role = str(b.church_role, 60) || null;
+  let ministry_ids = (Array.isArray(b.ministry_ids) ? b.ministry_ids : []).filter((x: unknown) => typeof x === "string" && UUID_RE.test(x));
+  const days = Number(b.expires_days) || 0;
+  if (church_role && !CHURCH_ROLES.includes(church_role)) return res.status(400).json({ error: "Função inválida" });
+  if (days < 0 || days > 365) return res.status(400).json({ error: "Prazo inválido" });
+  try {
+    const scope = await inviteScope(req, res);
+    if (!scope) return;
+    if (scope.areas !== null) {
+      role = "viewer";
+      if (church_role && LEADER_BLOCKED_CHURCH_ROLES.includes(church_role)) {
+        return res.status(403).json({ error: "Essa função só o administrador pode dar." });
+      }
+      ministry_ids = ministry_ids.filter((id: string) => scope.areas!.includes(id));
+      if (!ministry_ids.length) ministry_ids = scope.areas;
+    }
+    // Link aberto nunca dá acesso de administrador
+    if (!["agenda", "viewer"].includes(role)) return res.status(400).json({ error: "O link aberto só pode ser de Agenda ou Visualizador." });
+    const valid = (await query<{ id: string }>("SELECT id FROM ministries WHERE id = ANY($1::uuid[])", [ministry_ids])).map((m) => m.id);
+    const row = await queryOne<{ id: string }>(
+      `INSERT INTO invite_links (token, label, role, church_role, ministry_ids, created_by, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 > 0 THEN NOW() + make_interval(days => $7) END) RETURNING id`,
+      [newLinkToken(), label, role, church_role, valid, req.auth!.userId, days]
+    );
+    await audit(req.auth!.userId, "create_invite_link", row!.id, { label, role, church_role, ministry_ids: valid, expires_days: days || null });
+    return res.status(201).json(withUrl(await queryOne(`${LINK_LIST} WHERE l.id = $1`, [row!.id])));
+  } catch (error: any) {
+    console.error("Create invite link error:", error);
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
+// DELETE /api/invites/links/:id  (desativa: o link para de funcionar para todo mundo)
+inviteRouter.delete("/links/:id", requireTeam, async (req: Request, res: Response) => {
+  if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: "Link não encontrado" });
+  try {
+    const scope = await inviteScope(req, res);
+    if (!scope) return;
+    const row = await queryOne(
+      `UPDATE invite_links l SET revoked_at = NOW()
+        WHERE l.id = $3 AND l.revoked_at IS NULL AND ($2::uuid[] IS NULL OR ${LINK_SCOPE}) RETURNING l.id`,
+      [req.auth!.userId, scope.areas, req.params.id]
+    );
+    if (!row) return res.status(404).json({ error: "Link não encontrado" });
+    await audit(req.auth!.userId, "revoke_invite_link", req.params.id, {});
+    return res.json({ ok: true });
+  } catch (error) {
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
 // ---------- Público (página do convite) ----------
 
 export const publicInviteRouter = Router();
@@ -224,6 +309,60 @@ publicInviteRouter.post("/:token", rateLimit(100, 15 * 60_000), async (req: Requ
   } catch (error: any) {
     if (error instanceof InviteError) return res.status(error.status).json({ error: error.message });
     console.error("Accept invite error:", error);
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
+// ---------- Público: link de convite aberto ----------
+
+const LINK_CLOSED = "Este link de convite foi desativado ou venceu. Peça um novo a quem te enviou.";
+
+/** Já entra logado depois do cadastro */
+async function loginResponse(userId: string) {
+  const user = (await queryOne<{ id: string; email: string; role: string }>("SELECT id, email, role FROM users WHERE id = $1", [userId]))!;
+  const token = jwt.sign({ userId: user.id, email: user.email, role: user.role }, process.env.JWT_SECRET!, {
+    expiresIn: (process.env.JWT_EXPIRES_IN || "7d") as any,
+  });
+  const [kids_access, cars_access, media_access] = await Promise.all([
+    hasKidsAccess(user.id, user.role),
+    hasCarsAccess(user.id, user.role),
+    hasMediaAccess(user.id, user.role),
+  ]);
+  return { token, user: { ...user, kids_access, cars_access, media_access } };
+}
+
+// GET /api/public/invites/link/:token
+publicInviteRouter.get("/link/:token", rateLimit(300, 10 * 60_000), async (req: Request, res: Response) => {
+  try {
+    const link = await openLinkByToken(req.params.token);
+    return link ? res.json(await publicLink(link)) : res.status(404).json({ error: LINK_CLOSED });
+  } catch (error) {
+    return res.status(500).json({ error: "Erro interno do servidor" });
+  }
+});
+
+// POST /api/public/invites/link/:token  { full_name, email, whatsapp, password }  → já entra logado
+publicInviteRouter.post("/link/:token", rateLimit(60, 15 * 60_000), async (req: Request, res: Response) => {
+  const full_name = str(req.body?.full_name, 120);
+  const email = str(req.body?.email, 120).toLowerCase();
+  const rawPhone = str(req.body?.whatsapp, 30);
+  const password = typeof req.body?.password === "string" ? req.body.password : "";
+  if (full_name.length < 3) return res.status(400).json({ error: "Informe o seu nome completo" });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "Informe um e-mail válido" });
+  if (rawPhone.replace(/\D/g, "").length < 10) return res.status(400).json({ error: "Informe o seu WhatsApp com DDD" });
+  if (password.length < 6) return res.status(400).json({ error: "A senha deve ter no mínimo 6 caracteres" });
+  if (password.length > 200) return res.status(400).json({ error: "Senha longa demais" });
+
+  try {
+    const link = await openLinkByToken(req.params.token);
+    if (!link) return res.status(404).json({ error: LINK_CLOSED });
+    const r = await resolveWhatsapp(rawPhone);
+    if (!r.exists || !r.jid) return res.status(400).json({ error: "Esse número não tem WhatsApp. Confira o DDD e o número." });
+    const userId = await acceptLink(link, { full_name, email, whatsapp: r.jid.split("@")[0], password });
+    return res.status(201).json(await loginResponse(userId));
+  } catch (error: any) {
+    if (error instanceof InviteError) return res.status(error.status).json({ error: error.message });
+    console.error("Accept invite link error:", error);
     return res.status(500).json({ error: "Erro interno do servidor" });
   }
 });

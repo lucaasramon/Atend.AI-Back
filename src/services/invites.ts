@@ -158,3 +158,73 @@ export async function acceptInvite(inv: Invite, data: { full_name: string; email
   );
   return userId;
 }
+
+// ---------- Link de convite aberto (vários cadastros pelo mesmo link) ----------
+
+export interface InviteLink {
+  id: string;
+  token: string;
+  label: string | null;
+  role: "agenda" | "viewer";
+  church_role: string | null;
+  ministry_ids: string[];
+  created_by: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+  uses: number;
+  created_at: string;
+}
+
+export const openLinkUrl = (token: string) => `${appUrl()}/convite?link=${token}`;
+export const newLinkToken = () => crypto.randomBytes(24).toString("hex");
+
+/** Link aberto válido (ou null) */
+export const openLinkByToken = (token: string) =>
+  /^[0-9a-f]{48}$/.test(token)
+    ? queryOne<InviteLink>(
+        "SELECT * FROM invite_links WHERE token = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())",
+        [token]
+      )
+    : Promise.resolve(null);
+
+export async function publicLink(link: InviteLink) {
+  return { label: link.label, role: link.role, church_role: link.church_role, areas: await areaNames(link.ministry_ids) };
+}
+
+/**
+ * Cadastro pelo link aberto. Não deixa cadastrar duas vezes: se o e-mail ou o WhatsApp
+ * já existem na plataforma (qualquer perfil), recusa e manda entrar com a conta que já tem.
+ * (Não promove conta existente: o link é aberto e o WhatsApp não é confirmado.)
+ */
+export async function acceptLink(
+  link: InviteLink,
+  data: { full_name: string; email: string; whatsapp: string; password: string }
+): Promise<string> {
+  const email = data.email.trim().toLowerCase();
+  const ALREADY = "Você já tem cadastro na plataforma. Entre com o seu e-mail e a sua senha (ou use \"Esqueci minha senha\").";
+  if (await queryOne("SELECT 1 FROM users WHERE email = $1", [email])) throw new InviteError(ALREADY, 409);
+  if (await userByPhone(data.whatsapp)) throw new InviteError(ALREADY, 409);
+
+  let userId: string;
+  try {
+    const row = await queryOne<{ id: string }>(
+      `INSERT INTO users (email, password_hash, role, full_name, whatsapp, church_role, invite_link_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [email, await bcrypt.hash(data.password, 12), link.role, data.full_name, data.whatsapp, link.church_role, link.id]
+    );
+    userId = row!.id;
+  } catch (e: any) {
+    if (e.code === "23505") throw new InviteError(ALREADY, 409); // dois envios ao mesmo tempo
+    throw e;
+  }
+  // Só áreas que ainda existem
+  const valid = (await query<{ id: string }>("SELECT id FROM ministries WHERE id = ANY($1::uuid[])", [link.ministry_ids])).map((m) => m.id);
+  await setUserMinistries(userId, valid);
+  await query("UPDATE invite_links SET uses = uses + 1 WHERE id = $1", [link.id]);
+  await syncMemberFromUser(userId); // já entra nas escalas
+  await query(
+    "INSERT INTO audit_logs (admin_id, action, target_type, target_id, details) VALUES ($1, 'accept_invite_link', 'user', $1, $2)",
+    [userId, JSON.stringify({ invite_link_id: link.id, email, role: link.role })]
+  );
+  return userId;
+}
