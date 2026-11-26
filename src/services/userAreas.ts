@@ -50,3 +50,45 @@ export async function canManageEvent(userId: string, role: string, eventId: stri
   );
   return !!row;
 }
+
+// Funções na igreja que contam como liderança da área
+export const LEADER_CHURCH_ROLES = ["Líder", "Vice-líder", "Coordenador(a)"];
+
+/**
+ * Áreas em que o usuário pode montar a escala (null = todas, admin).
+ * Pode quem é líder da área (cadastrado como líder no ministério), quem tem função de liderança
+ * (Líder, Vice-líder, Coordenador) numa área sua, e o perfil "agenda" nas suas áreas.
+ */
+export async function rosterMinistryIds(userId: string, role: string): Promise<string[] | null> {
+  if (role === "admin") return null;
+  const rows = await query<{ id: string }>(
+    `SELECT id FROM ministries WHERE leader_id = $1
+     UNION
+     SELECT um.ministry_id FROM user_ministries um JOIN users u ON u.id = um.user_id
+      WHERE um.user_id = $1 AND ($2 = 'agenda' OR u.church_role = ANY($3::text[]))`,
+    [userId, role, LEADER_CHURCH_ROLES]
+  );
+  return rows.map((r) => r.id);
+}
+
+/**
+ * Áreas que o usuário lidera: cadastrado como líder no ministério ou com função de liderança
+ * (Líder, Vice-líder, Coordenador) numa área sua. Só perfis da equipe (agenda/viewer); admin não precisa.
+ */
+export async function leaderMinistryIds(userId: string, role: string): Promise<string[]> {
+  if (role !== "agenda" && role !== "viewer") return [];
+  const rows = await query<{ id: string }>(
+    `SELECT id FROM ministries WHERE leader_id = $1
+     UNION
+     SELECT um.ministry_id FROM user_ministries um JOIN users u ON u.id = um.user_id
+      WHERE um.user_id = $1 AND u.church_role = ANY($2::text[])`,
+    [userId, LEADER_CHURCH_ROLES]
+  );
+  return rows.map((r) => r.id);
+}
+
+// Funções que o líder NÃO pode dar no convite (liderança e pastoreio ficam com o admin)
+export const LEADER_BLOCKED_CHURCH_ROLES = [
+  "Apóstolo(a)", "Bispo(a)", "Pastor(a)", "Pastor(a) auxiliar", "Presbítero(a)", "Evangelista", "Missionário(a)",
+  ...LEADER_CHURCH_ROLES,
+];

@@ -1,15 +1,16 @@
 /**
  * Convites para a equipe
- *   /api/invites                 (admin) criar, listar, reenviar e cancelar
+ *   /api/invites                 (admin e líderes) criar, listar, reenviar e cancelar
+ *                                líder: só convida como Visualizador, para as áreas que lidera, e só vê/mexe nos convites delas
  *   /api/public/invites/:token   (sem login) a pessoa vê o convite e completa o cadastro
  */
 import { Router, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import { query, queryOne } from "../db";
-import { requireAdmin } from "../middleware/auth";
+import { requireRole } from "../middleware/auth";
 import { rateLimit } from "../middleware/rateLimit";
 import { resolveWhatsapp, userByPhone } from "../services/access";
-import { CHURCH_ROLES } from "../services/userAreas";
+import { CHURCH_ROLES, LEADER_BLOCKED_CHURCH_ROLES, leaderMinistryIds } from "../services/userAreas";
 import {
   Invite, InviteError, acceptInvite, inviteLink, inviteMessage, inviteUsed, openInviteByToken, publicInvite, renewToken, sendInvite,
 } from "../services/invites";
@@ -37,18 +38,38 @@ const audit = (adminId: string, action: string, targetId: string, details: objec
     adminId, action, targetId, JSON.stringify(details),
   ]);
 
-// ---------- Admin ----------
+// ---------- Admin e líderes ----------
 
 export const inviteRouter = Router();
 
+/**
+ * Admin: tudo (null). Líder: as áreas que lidera. Outros: 403.
+ * O líder vê e mexe nos convites que ele mandou ou que são das áreas dele.
+ */
+async function inviteScope(req: Request, res: Response): Promise<{ areas: string[] | null } | null> {
+  if (req.auth!.role === "admin") return { areas: null };
+  const areas = await leaderMinistryIds(req.auth!.userId, req.auth!.role);
+  if (!areas.length) {
+    res.status(403).json({ error: "Só administradores e líderes de área podem convidar." });
+    return null;
+  }
+  return { areas };
+}
+const SCOPE_SQL = "(i.invited_by = $1 OR i.ministry_ids && $2::uuid[])";
+
+const requireTeam = requireRole("admin", "agenda", "viewer");
+
 // GET /api/invites  (em aberto e os aceitos nos últimos 30 dias)
-inviteRouter.get("/", requireAdmin, async (_req: Request, res: Response) => {
+inviteRouter.get("/", requireTeam, async (req: Request, res: Response) => {
   try {
+    const scope = await inviteScope(req, res);
+    if (!scope) return;
+    const where = `i.cancelled_at IS NULL AND (i.accepted_at IS NULL OR i.accepted_at > NOW() - INTERVAL '30 days')`;
+    const order = "ORDER BY (i.accepted_at IS NOT NULL), i.created_at DESC";
     return res.json(
-      await query(
-        `${LIST} WHERE i.cancelled_at IS NULL AND (i.accepted_at IS NULL OR i.accepted_at > NOW() - INTERVAL '30 days')
-          ORDER BY (i.accepted_at IS NOT NULL), i.created_at DESC`
-      )
+      scope.areas === null
+        ? await query(`${LIST} WHERE ${where} ${order}`)
+        : await query(`${LIST} WHERE ${where} AND ${SCOPE_SQL} ${order}`, [req.auth!.userId, scope.areas])
     );
   } catch (error) {
     return res.status(500).json({ error: "Erro interno do servidor" });
@@ -56,18 +77,30 @@ inviteRouter.get("/", requireAdmin, async (_req: Request, res: Response) => {
 });
 
 // POST /api/invites  { full_name, whatsapp, role, church_role?, ministry_ids?, send? (padrão: robô envia) }
-inviteRouter.post("/", requireAdmin, async (req: Request, res: Response) => {
+inviteRouter.post("/", requireTeam, async (req: Request, res: Response) => {
   const b = req.body || {};
   const full_name = str(b.full_name, 120);
-  const role = str(b.role, 20);
+  let role = str(b.role, 20);
   const church_role = str(b.church_role, 60) || null;
-  const ministry_ids = (Array.isArray(b.ministry_ids) ? b.ministry_ids : []).filter((x: unknown) => typeof x === "string" && UUID_RE.test(x));
+  let ministry_ids = (Array.isArray(b.ministry_ids) ? b.ministry_ids : []).filter((x: unknown) => typeof x === "string" && UUID_RE.test(x));
   if (full_name.length < 2) return res.status(400).json({ error: "Informe o nome" });
   if (!str(b.whatsapp, 30)) return res.status(400).json({ error: "Informe o WhatsApp" });
-  if (!TEAM_ROLES.includes(role)) return res.status(400).json({ error: "Perfil inválido" });
   if (church_role && !CHURCH_ROLES.includes(church_role)) return res.status(400).json({ error: "Função inválida" });
 
   try {
+    const scope = await inviteScope(req, res);
+    if (!scope) return;
+    if (scope.areas !== null) {
+      // Líder: convida só como Visualizador, sem função de liderança/pastoreio, para as áreas que lidera
+      role = "viewer";
+      if (church_role && LEADER_BLOCKED_CHURCH_ROLES.includes(church_role)) {
+        return res.status(403).json({ error: "Essa função só o administrador pode dar." });
+      }
+      ministry_ids = ministry_ids.filter((id: string) => scope.areas!.includes(id));
+      if (!ministry_ids.length) ministry_ids = scope.areas;
+    }
+    if (!TEAM_ROLES.includes(role)) return res.status(400).json({ error: "Perfil inválido" });
+
     const r = await resolveWhatsapp(str(b.whatsapp, 30));
     if (!r.exists || !r.jid) return res.status(400).json({ error: "Esse número não tem WhatsApp" });
     const number = r.jid.split("@")[0];
@@ -102,10 +135,16 @@ inviteRouter.post("/", requireAdmin, async (req: Request, res: Response) => {
 });
 
 // POST /api/invites/:id/resend  { send? }  (link novo, prazo renovado)
-inviteRouter.post("/:id/resend", requireAdmin, async (req: Request, res: Response) => {
+inviteRouter.post("/:id/resend", requireTeam, async (req: Request, res: Response) => {
   if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: "Convite não encontrado" });
   try {
-    const inv = await queryOne<Invite>("SELECT * FROM team_invites WHERE id = $1 AND accepted_at IS NULL AND cancelled_at IS NULL", [req.params.id]);
+    const scope = await inviteScope(req, res);
+    if (!scope) return;
+    const inv = await queryOne<Invite>(
+      `SELECT i.* FROM team_invites i WHERE i.id = $3 AND i.accepted_at IS NULL AND i.cancelled_at IS NULL
+          AND ($2::uuid[] IS NULL OR ${SCOPE_SQL})`,
+      [req.auth!.userId, scope.areas, req.params.id]
+    );
     if (!inv) return res.status(404).json({ error: "Convite não encontrado ou já usado" });
     const token = await renewToken(inv.id);
     const send = req.body?.send !== false;
@@ -118,12 +157,16 @@ inviteRouter.post("/:id/resend", requireAdmin, async (req: Request, res: Respons
 });
 
 // DELETE /api/invites/:id  (cancela: o link deixa de funcionar)
-inviteRouter.delete("/:id", requireAdmin, async (req: Request, res: Response) => {
+inviteRouter.delete("/:id", requireTeam, async (req: Request, res: Response) => {
   if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: "Convite não encontrado" });
   try {
+    const scope = await inviteScope(req, res);
+    if (!scope) return;
     const row = await queryOne(
-      "UPDATE team_invites SET cancelled_at = NOW() WHERE id = $1 AND accepted_at IS NULL AND cancelled_at IS NULL RETURNING id",
-      [req.params.id]
+      `UPDATE team_invites i SET cancelled_at = NOW()
+        WHERE i.id = $3 AND i.accepted_at IS NULL AND i.cancelled_at IS NULL AND ($2::uuid[] IS NULL OR ${SCOPE_SQL})
+        RETURNING i.id`,
+      [req.auth!.userId, scope.areas, req.params.id]
     );
     if (!row) return res.status(404).json({ error: "Convite não encontrado ou já usado" });
     await audit(req.auth!.userId, "cancel_invite", req.params.id, {});

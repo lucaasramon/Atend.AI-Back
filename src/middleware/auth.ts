@@ -42,7 +42,8 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-const AGENDA_PATHS = /^\/api\/(auth\/(me|change-password)|(events|ministries|locations|pops|media|members|areas|sermons|kids|cars|worship|screen|home|me)(\/.*)?)$/;
+// users (só a lista) e invites: líderes de área veem a equipe e convidam — as rotas conferem quem é líder
+const AGENDA_PATHS = /^\/api\/(auth\/(me|change-password)|users|(events|ministries|locations|pops|media|members|areas|sermons|kids|cars|worship|screen|home|me|invites)(\/.*)?)$/;
 const MEMBER_PATHS = /^\/api\/(auth\/(me|change-password)|(home|me)(\/.*)?)$/;
 
 /** Exige um dos tipos de usuário informados */

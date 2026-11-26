@@ -9,6 +9,7 @@ import { rateLimit } from "../middleware/rateLimit";
 import { hasKidsAccess } from "../services/kids";
 import { hasCarsAccess } from "../services/cars";
 import { hasMediaAccess } from "../services/screenRequests";
+import { leaderMinistryIds, rosterMinistryIds } from "../services/userAreas";
 
 const router = Router();
 
@@ -181,6 +182,10 @@ router.get("/me", requireAuth, async (req: Request, res: Response) => {
     user.cars_access = await hasCarsAccess(user.id, user.role);
     // Mídia: aprova o que vai para o telão
     user.media_access = await hasMediaAccess(user.id, user.role);
+    // Escalas: áreas em que monta a escala (null = todas, admin; [] = nenhuma)
+    user.roster_ministry_ids = ["admin", "agenda", "viewer"].includes(user.role) ? await rosterMinistryIds(user.id, user.role) : [];
+    // Líder: áreas que lidera (vê a equipe delas e convida pessoas em Usuários)
+    user.leader_ministry_ids = await leaderMinistryIds(user.id, user.role);
     return res.json(user);
   } catch (error) {
     return res.status(500).json({ error: "Erro interno do servidor" });

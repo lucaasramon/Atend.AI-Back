@@ -2,12 +2,12 @@ import { Router, Request, Response } from "express";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { query, queryOne } from "../db";
-import { requireAdmin } from "../middleware/auth";
+import { requireAdmin, requireRole } from "../middleware/auth";
 import { accessLink, accessMessageText, issueTemporaryAccess, resolveWhatsapp, sendAccessMessage } from "../services/access";
 
 /** Como entregar o acesso: link para o admin enviar (padrão) ou mensagem do robô */
 const deliveryOf = (v: unknown): "link" | "whatsapp" => (v === "whatsapp" ? "whatsapp" : "link");
-import { CHURCH_ROLES, setUserMinistries } from "../services/userAreas";
+import { CHURCH_ROLES, leaderMinistryIds, setUserMinistries } from "../services/userAreas";
 import { syncMemberFromUser } from "../services/members";
 
 const router = Router();
@@ -69,9 +69,26 @@ async function grantAccess(user: any, delivery: "link" | "whatsapp") {
   }
 }
 
-// GET /api/users
-router.get("/", requireAdmin, async (_req: Request, res: Response) => {
+// GET /api/users  (admin: toda a equipe; líder: só quem é das áreas que lidera, para ver a equipe — sem editar)
+router.get("/", requireRole(...TEAM_ROLES), async (req: Request, res: Response) => {
   try {
+    if (req.auth!.role !== "admin") {
+      const areas = await leaderMinistryIds(req.auth!.userId, req.auth!.role);
+      if (!areas.length) return res.status(403).json({ error: "Acesso negado" });
+      return res.json(
+        await query(
+          `SELECT id, email, full_name, whatsapp, role, church_role, must_change_password, created_at,
+                  (SELECT COALESCE(json_agg(json_build_object('id', m.id, 'name', m.name, 'color', m.color) ORDER BY m.name), '[]')
+                     FROM user_ministries um JOIN ministries m ON m.id = um.ministry_id
+                    WHERE um.user_id = users.id AND um.ministry_id = ANY($2::uuid[])) AS ministries
+             FROM users
+            WHERE role = ANY($1)
+              AND EXISTS (SELECT 1 FROM user_ministries um WHERE um.user_id = users.id AND um.ministry_id = ANY($2::uuid[]))
+            ORDER BY full_name NULLS LAST, email`,
+          [TEAM_ROLES, areas]
+        )
+      );
+    }
     const rows = await query(
       `SELECT ${FIELDS} FROM users WHERE role = ANY($1) ORDER BY full_name NULLS LAST, email`,
       [TEAM_ROLES]

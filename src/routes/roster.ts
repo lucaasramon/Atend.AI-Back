@@ -13,7 +13,7 @@ import { resolveWhatsapp } from "../services/access";
 import { placeholderHash, rosterInfo, runRosterGroups, sendRosterEntry, updateRosterChecklist } from "../services/roster";
 import { getAllowedGroups } from "../services/reminders";
 import { isPastTodayRun } from "../services/scheduler";
-import { userMinistryIds } from "../services/userAreas";
+import { rosterMinistryIds } from "../services/userAreas";
 
 const requireEditor = requireRole("admin", "agenda");
 const requireReader = requireRole("admin", "agenda", "viewer");
@@ -29,10 +29,10 @@ async function checkNumber(raw: string | undefined): Promise<string | null> {
   return r.jid.split("@")[0];
 }
 
-/** Quem não é admin só monta escala das suas áreas */
+/** Quem não é admin só monta escala das áreas que lidera (ou das suas, no perfil agenda) */
 async function canEditMinistry(req: Request, ministryId: string): Promise<boolean> {
-  if (req.auth!.role === "admin") return true;
-  return (await userMinistryIds(req.auth!.userId)).includes(ministryId);
+  const own = await rosterMinistryIds(req.auth!.userId, req.auth!.role);
+  return own === null || own.includes(ministryId);
 }
 
 // ---------- Membros ----------
@@ -67,13 +67,23 @@ membersRouter.get("/", requireReader, async (_req: Request, res: Response) => {
   }
 });
 
-membersRouter.post("/", requireEditor, async (req: Request, res: Response) => {
+// Admin/agenda cadastram qualquer membro; líder (perfil viewer) cadastra pessoa sem conta nas áreas que lidera,
+// só para preencher a escala de quem não usa o sistema (sem WhatsApp: ninguém recebe nada).
+membersRouter.post("/", requireReader, async (req: Request, res: Response) => {
   const name = String(req.body.name || "").trim();
   if (!name) return res.status(400).json({ error: "Informe o nome" });
   try {
-    const whatsapp = await checkNumber(req.body.whatsapp);
+    let ministryIds = ids(req.body.ministry_ids);
+    let whatsapp: string | null = null;
+    if (req.auth!.role === "viewer") {
+      const own = (await rosterMinistryIds(req.auth!.userId, req.auth!.role)) || [];
+      if (!own.length) return res.status(403).json({ error: "Acesso negado" });
+      ministryIds = ministryIds.filter((id) => own.includes(id));
+    } else {
+      whatsapp = await checkNumber(req.body.whatsapp);
+    }
     const row = await queryOne<{ id: string }>("INSERT INTO members (name, whatsapp) VALUES ($1, $2) RETURNING id", [name, whatsapp]);
-    await setMinistries(row!.id, ids(req.body.ministry_ids));
+    await setMinistries(row!.id, ministryIds);
     return res.status(201).json(await getMember(row!.id));
   } catch (error: any) {
     return res.status(error.status || 400).json({ error: error.status ? error.message : "Dados inválidos" });
@@ -243,7 +253,7 @@ eventRosterRouter.get("/:eventId/roster/group/:ministryId", requireReader, async
 // PUT /api/events/:eventId/roster/ministry/:ministryId  { entries: [{ member_id, task?, area_id? }], group_jid? }
 // Salva a escala completa da área no evento: inclui os novos, atualiza a função e remove quem saiu.
 // group_jid: grupo que recebe a escala 1 dia antes ("" ou null = não enviar em grupo; ausente = não mexe).
-eventRosterRouter.put("/:eventId/roster/ministry/:ministryId", requireEditor, async (req: Request, res: Response) => {
+eventRosterRouter.put("/:eventId/roster/ministry/:ministryId", requireReader, async (req: Request, res: Response) => {
   const { eventId, ministryId } = req.params;
   const list: any[] = Array.isArray(req.body.entries) ? req.body.entries : [];
   if (list.some((e) => !UUID_RE.test(e?.member_id || ""))) return res.status(400).json({ error: "Membro inválido" });
@@ -296,7 +306,7 @@ eventRosterRouter.put("/:eventId/roster/ministry/:ministryId", requireEditor, as
   }
 });
 
-eventRosterRouter.delete("/roster/:entryId", requireEditor, async (req: Request, res: Response) => {
+eventRosterRouter.delete("/roster/:entryId", requireReader, async (req: Request, res: Response) => {
   try {
     const entry = await queryOne<{ ministry_id: string }>("SELECT ministry_id FROM roster_entries WHERE id = $1", [req.params.entryId]);
     if (entry && !(await canEditMinistry(req, entry.ministry_id))) {
@@ -310,8 +320,12 @@ eventRosterRouter.delete("/roster/:entryId", requireEditor, async (req: Request,
 });
 
 // POST /api/events/roster/:entryId/send  (envia/reenvia o checklist agora)
-eventRosterRouter.post("/roster/:entryId/send", requireEditor, async (req: Request, res: Response) => {
+eventRosterRouter.post("/roster/:entryId/send", requireReader, async (req: Request, res: Response) => {
   try {
+    const entry = await queryOne<{ ministry_id: string }>("SELECT ministry_id FROM roster_entries WHERE id = $1", [req.params.entryId]);
+    if (entry && !(await canEditMinistry(req, entry.ministry_id))) {
+      return res.status(403).json({ error: "Você só pode enviar escalas das suas áreas." });
+    }
     const ok = await sendRosterEntry(req.params.entryId);
     if (!ok) return res.status(400).json({ error: "Não foi possível enviar (membro sem WhatsApp?)" });
     return res.json(await queryOne(`${ROSTER_SELECT} WHERE r.id = $1`, [req.params.entryId]));
